@@ -1,0 +1,11 @@
+[package]
+name = "example_wallet_esplora_blocking_redb"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+
+[dependencies]
+bdk_wallet = { version = "2.0.0" }
+bdk_esplora = { version = "0.22.0", features = ["blocking"] }
+anyhow = "1"
+bdk_redb = { git = "https://github.com/110CodingP/bdk_redb" }
