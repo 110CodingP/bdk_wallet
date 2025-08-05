@@ -233,3 +233,72 @@ where
     assert_eq!(changeset_read.descriptor.unwrap(), descriptor);
     assert_eq!(changeset_read.change_descriptor.unwrap(), change_descriptor);
 }
+
+pub fn persist_keychains_reversed<Db, CreateDb>(filename: &str, create_db: CreateDb)
+where
+    CreateDb: Fn(&Path) -> anyhow::Result<Db>,
+    Db: WalletPersister,
+    Db::Error: Debug,
+{
+    // create db
+    let temp_dir = tempfile::tempdir().expect("must create tempdir");
+    let file_path = temp_dir.path().join(filename);
+    let mut db = create_db(&file_path).expect("db should get created");
+
+    // initialize db
+    let changeset =
+        WalletPersister::initialize(&mut db).expect("should initialize and load empty changeset");
+    assert_eq!(changeset, ChangeSet::default());
+
+    let descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[1].parse().unwrap();
+    let change_descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[0].parse().unwrap();
+
+    let changeset = ChangeSet {
+        descriptor: Some(descriptor.clone()),
+        change_descriptor: Some(change_descriptor.clone()),
+        ..ChangeSet::default()
+    };
+
+    WalletPersister::persist(&mut db, &changeset).expect("should persist descriptors");
+
+    let changeset_read =
+        WalletPersister::initialize(&mut db).expect("should read persisted changeset");
+
+    assert_eq!(changeset_read.descriptor.unwrap(), descriptor);
+    assert_eq!(changeset_read.change_descriptor.unwrap(), change_descriptor);
+}
+
+
+pub fn persist_single_keychain<Db, CreateDb>(filename: &str, create_db: CreateDb)
+where
+    CreateDb: Fn(&Path) -> anyhow::Result<Db>,
+    Db: WalletPersister,
+    Db::Error: Debug,
+{
+    // create db
+    let temp_dir = tempfile::tempdir().expect("must create tempdir");
+    let file_path = temp_dir.path().join(filename);
+    let mut db = create_db(&file_path).expect("db should get created");
+
+    // initialize db
+    let changeset =
+        WalletPersister::initialize(&mut db).expect("should initialize and load empty changeset");
+    assert_eq!(changeset, ChangeSet::default());
+
+    let descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[1].parse().unwrap();
+
+    let changeset = ChangeSet {
+        descriptor: Some(descriptor.clone()),
+        ..ChangeSet::default()
+    };
+
+    WalletPersister::persist(&mut db, &changeset).expect("should persist descriptors");
+
+    let changeset_read =
+        WalletPersister::initialize(&mut db).expect("should read persisted changeset");
+
+    assert_eq!(changeset_read.descriptor.unwrap(), descriptor);
+    assert_eq!(changeset_read.change_descriptor, None);
+}
+
+
