@@ -7,11 +7,11 @@ use crate::{
     miniscript::descriptor::{Descriptor, DescriptorPublicKey},
     ChangeSet, WalletPersister,
 };
+use bdk_testenv::{block_id, hash};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
-use bdk_testenv::{block_id, hash};
 
 pub const DESCRIPTORS: [&str; 4] = [
     "tr([5940b9b9/86'/0'/0']tpubDDVNqmq75GNPWQ9UNKfP43UwjaHU4GYfoPavojQbfpyfZp2KetWgjGBRRAy4tYCrAA6SB11mhQAkqxjh1VtQHyKwT4oYxpwLaGHvoKmtxZf/1/*)#ypcpw2dr",
@@ -168,4 +168,34 @@ where
     changeset.merge(changeset_new);
 
     assert_eq!(changeset, changeset_read_new);
+}
+
+pub fn persist_network<Db, CreateDb>(filename: &str, create_db: CreateDb)
+where
+    CreateDb: Fn(&Path) -> anyhow::Result<Db>,
+    Db: WalletPersister,
+    Db::Error: Debug,
+{
+    // create db
+    let temp_dir = tempfile::tempdir().expect("must create tempdir");
+    let file_path = temp_dir.path().join(filename);
+    let mut db = create_db(&file_path).expect("db should get created");
+
+    // initialize db
+    let changeset =
+        WalletPersister::initialize(&mut db).expect("should initialize and load empty changeset");
+    assert_eq!(changeset, ChangeSet::default());
+
+    // persist the network
+    let changeset = ChangeSet {
+        network: Some(Network::Bitcoin),
+        ..ChangeSet::default()
+    };
+    WalletPersister::persist(&mut db, &changeset).expect("should persist changeset");
+
+    // read the persisted changeset
+    let changeset_read =
+        WalletPersister::initialize(&mut db).expect("should load persisted changeset");
+
+    assert_eq!(changeset_read.network, Some(Network::Bitcoin));
 }
