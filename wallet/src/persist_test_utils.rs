@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use crate::{
     bitcoin::{
         absolute, hashes::Hash, transaction, Amount, BlockHash, Network, OutPoint, ScriptBuf,
@@ -169,6 +170,60 @@ where
 
     assert_eq!(changeset, changeset_read_new);
 }
+pub fn persist_multiple_wallet_changesets<Store, CreateStores>(
+    filename: &str,
+    create_dbs: CreateStores,
+) where
+    CreateStores: Fn(&Path) -> anyhow::Result<(Store, Store)>,
+    Store: WalletPersister,
+    Store::Error: Debug,
+{
+    let temp_dir = tempfile::tempdir().expect("must create tempdir");
+    let file_path = temp_dir.path().join(filename);
+
+    let (mut store_first, mut store_sec) =
+        create_dbs(&file_path).expect("store should get created");
+
+    let descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[0].parse().unwrap();
+    let change_descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[1].parse().unwrap();
+
+    let changeset1 = ChangeSet {
+        descriptor: Some(descriptor.clone()),
+        change_descriptor: Some(change_descriptor.clone()),
+        network: Some(Network::Bitcoin),
+        ..ChangeSet::default()
+    };
+
+    let changeset =
+        WalletPersister::initialize(&mut store_first).expect("should load empty changeset");
+    assert_eq!(changeset, ChangeSet::default());
+
+    WalletPersister::persist(&mut store_first, &changeset1).expect("should persist changeset");
+
+    let descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[2].parse().unwrap();
+    let change_descriptor: Descriptor<DescriptorPublicKey> = DESCRIPTORS[3].parse().unwrap();
+
+    let changeset2 = ChangeSet {
+        descriptor: Some(descriptor.clone()),
+        change_descriptor: Some(change_descriptor.clone()),
+        network: Some(Network::Bitcoin),
+        ..ChangeSet::default()
+    };
+
+    let changeset =
+        WalletPersister::initialize(&mut store_sec).expect("should load empty changeset");
+    assert_eq!(changeset, ChangeSet::default());
+
+    WalletPersister::persist(&mut store_sec, &changeset2).expect("should persist changeset");
+
+    let changeset_read =
+        WalletPersister::initialize(&mut store_first).expect("should load persisted changeset1");
+    assert_eq!(changeset_read, changeset1);
+
+    let changeset_read =
+        WalletPersister::initialize(&mut store_sec).expect("should load persisted changeset2");
+    assert_eq!(changeset_read, changeset2);
+}
 
 pub fn persist_network<Db, CreateDb>(filename: &str, create_db: CreateDb)
 where
@@ -268,7 +323,6 @@ where
     assert_eq!(changeset_read.change_descriptor.unwrap(), change_descriptor);
 }
 
-
 pub fn persist_single_keychain<Db, CreateDb>(filename: &str, create_db: CreateDb)
 where
     CreateDb: Fn(&Path) -> anyhow::Result<Db>,
@@ -300,5 +354,3 @@ where
     assert_eq!(changeset_read.descriptor.unwrap(), descriptor);
     assert_eq!(changeset_read.change_descriptor, None);
 }
-
-
