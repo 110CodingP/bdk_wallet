@@ -90,30 +90,12 @@ pub use persisted::*;
 pub use utils::IsDust;
 pub use utils::TxDetails;
 
-/// A Bitcoin wallet
-///
-/// The `Wallet` acts as a way of coherently interfacing with output descriptors and related
-/// transactions. Its main components are:
-///
-/// 1. output *descriptors* from which it can derive addresses.
-/// 2. [`signer`]s that can contribute signatures to addresses instantiated from the descriptors.
-///
-/// The user is responsible for loading and writing wallet changes which are represented as
-/// [`ChangeSet`]s (see [`take_staged`]). Also see individual functions and example for instructions
-/// on when [`Wallet`] state needs to be persisted.
-///
-/// The `Wallet` descriptor (external) and change descriptor (internal) must not derive the same
-/// script pubkeys. See [`KeychainTxOutIndex::insert_descriptor()`] for more details.
-///
-/// [`signer`]: crate::signer
-/// [`take_staged`]: Wallet::take_staged
+
 #[derive(Debug)]
-pub struct Wallet {
-    signers: Arc<SignersContainer>,
-    change_signers: Arc<SignersContainer>,
+pub struct Wallet<K: Ord> {
     chain: LocalChain,
-    tx_graph: IndexedTxGraph<ConfirmationBlockTime, KeychainTxOutIndex<KeychainKind>>,
-    stage: ChangeSet,
+    tx_graph: IndexedTxGraph<ConfirmationBlockTime, KeychainTxOutIndex<K>>,
+    stage: ChangeSet<K>,
     network: Network,
     secp: SecpCtx,
     locked_outpoints: HashSet<OutPoint>,
@@ -123,7 +105,7 @@ pub struct Wallet {
 ///
 /// It updates [`KeychainTxOutIndex`], [`bdk_chain::TxGraph`] and [`LocalChain`] atomically.
 #[derive(Debug, Clone, Default)]
-pub struct Update {
+pub struct Update<K> {
     /// Contains the last active derivation indices per keychain (`K`), which is used to update the
     /// [`KeychainTxOutIndex`].
     pub last_active_indices: BTreeMap<KeychainKind, u32>,

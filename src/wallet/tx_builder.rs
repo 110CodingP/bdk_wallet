@@ -111,7 +111,7 @@ use crate::{KeychainKind, LocalOutput, Utxo, WeightedUtxo};
 /// [`coin_selection`]: Self::coin_selection
 #[derive(Debug)]
 pub struct TxBuilder<'a, Cs> {
-    pub(crate) wallet: &'a mut Wallet,
+    pub(crate) wallet: &'a mut Wallet<KeychainKind>,
     pub(crate) params: TxParams,
     pub(crate) coin_selection: Cs,
 }

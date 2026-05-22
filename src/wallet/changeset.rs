@@ -1,3 +1,4 @@
+use alloc::collections::btree_map::BTreeMap;
 use bdk_chain::{
     indexed_tx_graph, keychain_txout, local_chain, tx_graph, ConfirmationBlockTime, Merge,
 };
@@ -9,136 +10,11 @@ use crate::locked_outpoints;
 type IndexedTxGraphChangeSet =
     indexed_tx_graph::ChangeSet<ConfirmationBlockTime, keychain_txout::ChangeSet>;
 
-/// A change set for [`Wallet`].
-///
-/// ## Definition
-///
-/// The change set is responsible for transmitting data between the persistent storage layer and the
-/// core library components. Specifically, it serves two primary functions:
-///
-/// 1) Recording incremental changes to the in-memory representation that need to be persisted to
-///    disk
-/// 2) Applying aggregate changes from the persistence layer to the in-memory representation at
-///    startup
-///
-/// ## Contract
-///
-/// The change set maintains and enforces the following properties:
-///
-/// * Change sets must implement [`Serialize`] and [`Deserialize`] to meet the definition from
-///   above.
-/// * Change sets must implement [`Default`] as a way of instantiating new empty objects.
-/// * Change sets must implement [`Merge`] so that many instances can be aggregated into a single
-///   instance.
-/// * A change set is composed of a number of individual "sub-change sets" that adhere to the same
-///   rules as above. This is for increased modularity and portability. For example the core modules
-///   each have their own change set (`tx_graph`, `local_chain`, etc).
-///
-/// ## Members and required fields
-///
-/// The change set has certain required fields without which a [`Wallet`] cannot function.
-/// These include the [`descriptor`] and the [`bitcoin::Network`] in use. These are required to be
-/// non-empty *in the aggregate*, meaning the field must be present and non-null in the union of all
-/// persisted changes, but may be empty in any one change set, where "empty" is defined by the
-/// [`Merge`](Merge::is_empty) implementation of that change set. This requirement also applies to
-/// the [`local_chain`] field in that the aggregate change set must include a genesis block.
-///
-/// For example, the [`descriptor`] and [`bitcoin::Network`] are present in the first change set
-/// after wallet creation, but are usually omitted in subsequent updates, as they are not permitted
-/// to change at any point thereafter.
-///
-/// Other fields of the change set are not required to be non-empty, that is they may be empty even
-/// in the aggregate. However, in practice they should contain the data needed to recover a wallet
-/// state between sessions. These include:
-/// * [`tx_graph`](Self::tx_graph)
-/// * [`indexer`](Self::indexer)
-///
-/// The [`change_descriptor`] is special in that its presence is optional, however the value of the
-/// change descriptor should be defined at wallet creation time and respected for the life of the
-/// wallet, meaning that if a change descriptor is originally defined, it must also be present in
-/// the aggregate change set.
-///
-/// ## Staging
-///
-/// For greater efficiency the [`Wallet`] is able to *stage* the to-be-persisted changes. Many
-/// operations result in staged changes which require persistence on the part of the user. These
-/// include address revelation, applying an [`Update`], and introducing transactions and chain
-/// data to the wallet. To get the staged changes see [`Wallet::staged`] and similar methods. Once
-/// the changes are committed to the persistence layer the contents of the stage should be
-/// discarded.
-///
-/// Users should persist early and often generally speaking, however in principle there is no
-/// limit to the number or type of changes that can be staged prior to persisting or the order in
-/// which they're staged. This is because change sets are designed to be [merged]. The change
-/// that is ultimately persisted will encompass the combined effect of each change individually.
-///
-/// ## Extensibility
-///
-/// Existing fields may be extended in the future with additional sub-fields. New top-level fields
-/// are likely to be added as new features and core components are implemented. Existing fields may
-/// be removed in future versions of the library following the deprecation policy below.
-///
-/// ## Version Compatibility
-///
-/// Any change to the [`ChangeSet`] data structure MUST correlate with a major version bump per
-/// [Semantic Versioning]. We guarantee that version N can read and
-/// deserialize [`ChangeSet`] data written by version N-1 (one major version back), but this
-/// guarantee does NOT extend to version N-2 or earlier. New fields added in version N must
-/// implement [`Default`] so that when reading N-1 data, absent fields are populated with default
-/// values.
-///
-/// Limited forward compatibility is provided for downgrades: version N-1 will successfully
-/// deserialize version N data without errors by ignoring unknown fields. Users should be aware that
-/// features introduced in version N will not be available when downgrading to N-1, and that
-/// downgrading can result in loss of data if not backed up. For this reason we recommend carefully
-/// planning major upgrades and backing up necessary data to avoid compatibility issues.
-///
-/// Fields can be removed using a 3-version deprecation cycle: fields are marked deprecated in
-/// version N with a reason and instructions for migrating, the field is retained in version N+1
-/// for compatibility where it deserializes but may not be used, and finally removed in version
-/// N+2. This ensures the standard backwards compatibility guarantees while allowing the removal of
-/// deprecated fields.
-///
-/// ### Responsibilities
-///
-/// Library authors SHOULD test all upgrade paths using the persistence test suite and in CI.
-/// Library authors MUST document API changes prominently in the release notes and CHANGELOG,
-/// clearly mark deprecated fields including migration instructions, and follow the 3-version
-/// deprecation cycle before removing fields.
-///
-/// Users SHOULD back up wallet data before major version upgrades, test upgrades in non-production
-/// environments first, and monitor the release notes for warnings and updates. Users MUST complete
-/// migrations within the compatibility window, and not skip major versions (i.e. upgrade major
-/// versions sequentially).
-///
-/// ### Custom Persistence Implementations
-///
-/// The resulting interface is designed to give the user more control of what to persist and when
-/// to persist it. Custom implementations should consider and account for the possibility of
-/// partial or repeat writes, the atomicity of persistence operations, and the order of reads and
-/// writes among the fields of the change set. BDK comes with support for [SQLite] that handles
-/// the details for you and is recommended for many users. If implementing your own persistence,
-/// please refer to the documentation for [`WalletPersister`] and [`PersistedWallet`] for more
-/// information.
-///
-/// [`change_descriptor`]: Self::change_descriptor
-/// [`descriptor`]: Self::descriptor
-/// [`local_chain`]: Self::local_chain
-/// [merged]: bdk_chain::Merge
-/// [`network`]: Self::network
-/// [`PersistedWallet`]: crate::PersistedWallet
-/// [SQLite]: <https://docs.rs/rusqlite/0.31.0/rusqlite/>
-/// [`Update`]: crate::Update
-/// [`WalletPersister`]: crate::WalletPersister
-/// [`Wallet::staged`]: crate::Wallet::staged
-/// [`Wallet`]: crate::Wallet
-/// [Semantic Versioning]: <https://doc.rust-lang.org/cargo/reference/semver.html>
-#[derive(Default, Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct ChangeSet {
-    /// Descriptor for recipient addresses.
-    pub descriptor: Option<Descriptor<DescriptorPublicKey>>,
-    /// Descriptor for change addresses.
-    pub change_descriptor: Option<Descriptor<DescriptorPublicKey>>,
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ChangeSet<K: Ord> {
+    /// Wallet descriptors
+    pub descriptors: BTreeMap<K, Descriptor<DescriptorPublicKey>>,
     /// Stores the network type of the transaction data.
     pub network: Option<bitcoin::Network>,
     /// Changes to the [`LocalChain`](local_chain::LocalChain).
@@ -152,24 +28,25 @@ pub struct ChangeSet {
     pub locked_outpoints: locked_outpoints::ChangeSet,
 }
 
-impl Merge for ChangeSet {
+impl<K: Ord> Default for ChangeSet<K> {
+    fn default() -> Self {
+        Self {
+            network: None,
+            descriptors: Default::default(),
+            local_chain: local_chain::ChangeSet::default(),
+            tx_graph: tx_graph::ChangeSet::<ConfirmationBlockTime>::default(),
+            indexer: keychain_txout::ChangeSet::default(),
+            locked_outpoints: locked_outpoints::ChangeSet::default(),
+        }
+    }
+}
+
+impl<K> Merge for ChangeSet<K>
+where K: Ord
+{
     /// Merge another [`ChangeSet`] into itself.
     fn merge(&mut self, other: Self) {
-        if other.descriptor.is_some() {
-            debug_assert!(
-                self.descriptor.is_none() || self.descriptor == other.descriptor,
-                "descriptor must never change"
-            );
-            self.descriptor = other.descriptor;
-        }
-        if other.change_descriptor.is_some() {
-            debug_assert!(
-                self.change_descriptor.is_none()
-                    || self.change_descriptor == other.change_descriptor,
-                "change descriptor must never change"
-            );
-            self.change_descriptor = other.change_descriptor;
-        }
+        // merge network
         if other.network.is_some() {
             debug_assert!(
                 self.network.is_none() || self.network == other.network,
@@ -177,6 +54,9 @@ impl Merge for ChangeSet {
             );
             self.network = other.network;
         }
+
+        // merge descriptors
+        self.descriptors.extend(other.descriptors);
 
         // merge locked outpoints
         self.locked_outpoints.merge(other.locked_outpoints);
@@ -187,8 +67,7 @@ impl Merge for ChangeSet {
     }
 
     fn is_empty(&self) -> bool {
-        self.descriptor.is_none()
-            && self.change_descriptor.is_none()
+        self.descriptors.is_empty()
             && self.network.is_none()
             && self.local_chain.is_empty()
             && self.tx_graph.is_empty()
@@ -198,13 +77,23 @@ impl Merge for ChangeSet {
 }
 
 #[cfg(feature = "rusqlite")]
-impl ChangeSet {
+use chain::{
+    rusqlite::{self, types::FromSql, OptionalExtension, ToSql},
+    Impl,
+};
+
+#[cfg(feature = "rusqlite")]
+impl<K> ChangeSet<K>
+where K: Ord + Clone + ToSql + FromSql,
+{
     /// Schema name for wallet.
     pub const WALLET_SCHEMA_NAME: &'static str = "bdk_wallet";
     /// Name of table to store wallet descriptors and network.
     pub const WALLET_TABLE_NAME: &'static str = "bdk_wallet";
     /// Name of table to store wallet locked outpoints.
     pub const WALLET_OUTPOINT_LOCK_TABLE_NAME: &'static str = "bdk_wallet_locked_outpoints";
+    /// Name of table to store wallet public descriptors.
+    pub const WALLET_DESC_TABLE_NAME: &'static str = "bdk_wallet_descriptors";
 
     /// Get v0 sqlite [ChangeSet] schema
     pub fn schema_v0() -> alloc::string::String {
@@ -231,12 +120,44 @@ impl ChangeSet {
         )
     }
 
+    pub fn schema_v2() -> alloc::string::String {
+        let create_desc_table = format!(
+            "CREATE TABLE {} ( \
+               keychain TEXT PRIMARY KEY NOT NULL, \
+               descriptor TEXT UNIQUE NOT NULL \
+            ) STRICT;",
+            Self::WALLET_DESC_TABLE_NAME,
+        );
+        let extract_descriptor = format!(
+            "INSERT INTO {} (keychain, descriptor) \
+            SELECT 0, {}.descriptor \
+            FROM {};",
+            Self::WALLET_TABLE_NAME,
+            Self::WALLET_DESC_TABLE_NAME,
+            Self::WALLET_DESC_TABLE_NAME
+        );
+        let extract_change_descriptor = format!(
+            "INSERT INTO {} (keychain, descriptor) \
+            SELECT 1, {}.change_descriptor \
+            FROM {} \
+            WHERE {}.change_descriptor IS NOT NULL;",
+            Self::WALLET_TABLE_NAME,
+            Self::WALLET_DESC_TABLE_NAME,
+            Self::WALLET_DESC_TABLE_NAME,
+            Self::WALLET_DESC_TABLE_NAME
+        );
+        let drop_desc_col = format!("ALTER TABLE {} DROP COLUMN descriptor;", Self::WALLET_TABLE_NAME);
+        let drop_change_desc_col = format!("ALTER TABLE {} DROP COLUMN change_descriptor;", Self::WALLET_TABLE_NAME);
+        format!("{create_desc_table} {extract_descriptor} {extract_change_descriptor} {drop_desc_col} {drop_change_desc_col}")
+    }
+
+    
     /// Initialize sqlite tables for wallet tables.
     pub fn init_sqlite_tables(db_tx: &chain::rusqlite::Transaction) -> chain::rusqlite::Result<()> {
         crate::rusqlite_impl::migrate_schema(
             db_tx,
             Self::WALLET_SCHEMA_NAME,
-            &[&Self::schema_v0(), &Self::schema_v1()],
+            &[&Self::schema_v0(), &Self::schema_v1(), &Self::schema_v2()],
         )?;
 
         bdk_chain::local_chain::ChangeSet::init_sqlite_tables(db_tx)?;
@@ -255,24 +176,32 @@ impl ChangeSet {
         let mut changeset = Self::default();
 
         let mut wallet_statement = db_tx.prepare(&format!(
-            "SELECT descriptor, change_descriptor, network FROM {}",
+            "SELECT network FROM {}",
             Self::WALLET_TABLE_NAME,
         ))?;
         let row = wallet_statement
-            .query_row([], |row| {
-                Ok((
-                    row.get::<_, Option<Impl<Descriptor<DescriptorPublicKey>>>>("descriptor")?,
-                    row.get::<_, Option<Impl<Descriptor<DescriptorPublicKey>>>>(
-                        "change_descriptor",
-                    )?,
-                    row.get::<_, Option<Impl<bitcoin::Network>>>("network")?,
-                ))
-            })
+            .query_row([], |row|
+                    row.get::<_, Option<Impl<bitcoin::Network>>>("network") )
             .optional()?;
-        if let Some((desc, change_desc, network)) = row {
-            changeset.descriptor = desc.map(Impl::into_inner);
-            changeset.change_descriptor = change_desc.map(Impl::into_inner);
+        if let Some(network) = row {
             changeset.network = network.map(Impl::into_inner);
+        }
+
+        let mut descriptor_stmt = db_tx.prepare(&format!(
+            "SELECT keychain, descriptor FROM {}",
+            Self::WALLET_TABLE_NAME
+        ))?;
+
+        let rows = descriptor_stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, K>("keychain")?,
+                row.get::<_, Impl<Descriptor<DescriptorPublicKey>>>("descriptor")?,
+            ))
+        })?;
+
+        for row in rows {
+            let (keychain, Impl(descriptor)) = row?;
+            changeset.descriptors.insert(keychain.clone(), descriptor);
         }
 
         // Select locked outpoints.
@@ -308,25 +237,15 @@ impl ChangeSet {
         use chain::rusqlite::named_params;
         use chain::Impl;
 
-        let mut descriptor_statement = db_tx.prepare_cached(&format!(
-            "INSERT INTO {}(id, descriptor) VALUES(:id, :descriptor) ON CONFLICT(id) DO UPDATE SET descriptor=:descriptor",
-            Self::WALLET_TABLE_NAME,
+        let mut descriptor_stmt = db_tx.prepare_cached(&format!(
+            "INSERT OR IGNORE INTO {}(keychain, descriptor) VALUES(:keychain, :desc)",
+            Self::WALLET_DESC_TABLE_NAME
         ))?;
-        if let Some(descriptor) = &self.descriptor {
-            descriptor_statement.execute(named_params! {
-                ":id": 0,
-                ":descriptor": Impl(descriptor.clone()),
-            })?;
-        }
 
-        let mut change_descriptor_statement = db_tx.prepare_cached(&format!(
-            "INSERT INTO {}(id, change_descriptor) VALUES(:id, :change_descriptor) ON CONFLICT(id) DO UPDATE SET change_descriptor=:change_descriptor",
-            Self::WALLET_TABLE_NAME,
-        ))?;
-        if let Some(change_descriptor) = &self.change_descriptor {
-            change_descriptor_statement.execute(named_params! {
-                ":id": 0,
-                ":change_descriptor": Impl(change_descriptor.clone()),
+        for (keychain, desc) in &self.descriptors {
+            descriptor_stmt.execute(named_params! {
+                ":keychain": keychain.clone(),
+                ":desc": Impl(desc.clone()),
             })?;
         }
 
@@ -372,7 +291,7 @@ impl ChangeSet {
     }
 }
 
-impl From<local_chain::ChangeSet> for ChangeSet {
+impl<K: Ord> From<local_chain::ChangeSet> for ChangeSet<K> {
     fn from(chain: local_chain::ChangeSet) -> Self {
         Self {
             local_chain: chain,
@@ -381,7 +300,7 @@ impl From<local_chain::ChangeSet> for ChangeSet {
     }
 }
 
-impl From<IndexedTxGraphChangeSet> for ChangeSet {
+impl<K: Ord> From<IndexedTxGraphChangeSet> for ChangeSet<K> {
     fn from(indexed_tx_graph: IndexedTxGraphChangeSet) -> Self {
         Self {
             tx_graph: indexed_tx_graph.tx_graph,
@@ -391,7 +310,7 @@ impl From<IndexedTxGraphChangeSet> for ChangeSet {
     }
 }
 
-impl From<tx_graph::ChangeSet<ConfirmationBlockTime>> for ChangeSet {
+impl<K: Ord> From<tx_graph::ChangeSet<ConfirmationBlockTime>> for ChangeSet<K> {
     fn from(tx_graph: tx_graph::ChangeSet<ConfirmationBlockTime>) -> Self {
         Self {
             tx_graph,
@@ -400,7 +319,7 @@ impl From<tx_graph::ChangeSet<ConfirmationBlockTime>> for ChangeSet {
     }
 }
 
-impl From<keychain_txout::ChangeSet> for ChangeSet {
+impl<K: Ord> From<keychain_txout::ChangeSet> for ChangeSet<K> {
     fn from(indexer: keychain_txout::ChangeSet) -> Self {
         Self {
             indexer,
@@ -409,7 +328,7 @@ impl From<keychain_txout::ChangeSet> for ChangeSet {
     }
 }
 
-impl From<locked_outpoints::ChangeSet> for ChangeSet {
+impl<K: Ord> From<locked_outpoints::ChangeSet> for ChangeSet<K> {
     fn from(locked_outpoints: locked_outpoints::ChangeSet) -> Self {
         Self {
             locked_outpoints,
