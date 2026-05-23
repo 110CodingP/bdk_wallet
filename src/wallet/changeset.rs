@@ -55,9 +55,18 @@ where K: Ord
             self.network = other.network;
         }
 
-        // merge descriptors
-        self.descriptors.extend(other.descriptors);
-
+        // merge descriptors (we do not allow addition of descriptors)
+        if !other.descriptors.is_empty() {
+            for keychain in other.descriptors.keys() {
+                let desc_old = self.descriptors.get(keychain);
+                debug_assert!(
+                   desc_old.is_none() || desc_old == other.descriptors.get(keychain),
+                   "descriptors must never change"
+                );
+            }
+            self.descriptors.extend(other.descriptors);
+        }
+       
         // merge locked outpoints
         self.locked_outpoints.merge(other.locked_outpoints);
 
@@ -201,7 +210,7 @@ where K: Ord + Clone + ToSql + FromSql,
 
         for row in rows {
             let (keychain, Impl(descriptor)) = row?;
-            changeset.descriptors.insert(keychain.clone(), descriptor);
+            changeset.descriptors.insert(keychain, descriptor);
         }
 
         // Select locked outpoints.

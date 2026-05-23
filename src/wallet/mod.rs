@@ -108,7 +108,7 @@ pub struct Wallet<K: Ord> {
 pub struct Update<K> {
     /// Contains the last active derivation indices per keychain (`K`), which is used to update the
     /// [`KeychainTxOutIndex`].
-    pub last_active_indices: BTreeMap<KeychainKind, u32>,
+    pub last_active_indices: BTreeMap<K, u32>,
 
     /// Update for the wallet's internal [`TxGraph`].
     pub tx_update: TxUpdate<ConfirmationBlockTime>,
@@ -117,8 +117,8 @@ pub struct Update<K> {
     pub chain: Option<CheckPoint>,
 }
 
-impl From<FullScanResponse<KeychainKind>> for Update {
-    fn from(value: FullScanResponse<KeychainKind>) -> Self {
+impl<K> From<FullScanResponse<K>> for Update<K> {
+    fn from(value: FullScanResponse<K>) -> Self {
         Self {
             last_active_indices: value.last_active_indices,
             tx_update: value.tx_update,
@@ -127,7 +127,7 @@ impl From<FullScanResponse<KeychainKind>> for Update {
     }
 }
 
-impl From<SyncResponse> for Update {
+impl<K> From<SyncResponse> for Update<K> {
     fn from(value: SyncResponse) -> Self {
         Self {
             last_active_indices: BTreeMap::new(),
@@ -140,16 +140,16 @@ impl From<SyncResponse> for Update {
 /// A derived address and the index it was found at.
 /// For convenience this automatically derefs to `Address`
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddressInfo {
+pub struct AddressInfo<K> {
     /// Child index of this address
     pub index: u32,
     /// Address
     pub address: Address,
     /// Type of keychain
-    pub keychain: KeychainKind,
+    pub keychain: K,
 }
 
-impl Deref for AddressInfo {
+impl<K> Deref for AddressInfo<K> {
     type Target = Address;
 
     fn deref(&self) -> &Self::Target {
@@ -157,7 +157,7 @@ impl Deref for AddressInfo {
     }
 }
 
-impl fmt::Display for AddressInfo {
+impl<K> fmt::Display for AddressInfo<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.address)
     }
@@ -166,54 +166,9 @@ impl fmt::Display for AddressInfo {
 /// A `CanonicalTx` managed by a `Wallet`.
 pub type WalletTx<'a> = CanonicalTx<'a, Arc<Transaction>, ConfirmationBlockTime>;
 
-impl Wallet {
-    /// Build a new single descriptor [`Wallet`].
-    ///
-    /// If you have previously created a wallet, use [`load`](Self::load) instead.
-    ///
-    /// # Note
-    ///
-    /// Only use this method when creating a wallet designed to be used with a single
-    /// descriptor and keychain. Otherwise the recommended way to construct a new wallet is
-    /// by using [`Wallet::create`]. It's worth noting that not all features are available
-    /// with single descriptor wallets, for example setting a [`change_policy`] on [`TxBuilder`]
-    /// and related methods such as [`do_not_spend_change`]. This is because all payments are
-    /// received on the external keychain (including change), and without a change keychain
-    /// BDK lacks enough information to distinguish between change and outside payments.
-    ///
-    /// Additionally because this wallet has no internal (change) keychain, all methods that
-    /// require a [`KeychainKind`] as input, e.g. [`reveal_next_address`] should only be called
-    /// using the [`External`] variant. In most cases passing [`Internal`] is treated as the
-    /// equivalent of [`External`] but this behavior must not be relied on.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use bdk_wallet::Wallet;
-    /// # use bitcoin::Network;
-    /// # const EXTERNAL_DESC: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
-    /// # let temp_dir = tempfile::tempdir().expect("must create tempdir");
-    /// # let file_path = temp_dir.path().join("store.db");
-    /// // Create a wallet that is persisted to SQLite database.
-    /// use bdk_wallet::rusqlite::Connection;
-    /// let mut conn = Connection::open(file_path)?;
-    /// let wallet = Wallet::create_single(EXTERNAL_DESC)
-    ///     .network(Network::Testnet)
-    ///     .create_wallet(&mut conn)?;
-    /// # Ok::<_, anyhow::Error>(())
-    /// ```
-    /// [`change_policy`]: TxBuilder::change_policy
-    /// [`do_not_spend_change`]: TxBuilder::do_not_spend_change
-    /// [`External`]: KeychainKind::External
-    /// [`Internal`]: KeychainKind::Internal
-    /// [`reveal_next_address`]: Self::reveal_next_address
-    pub fn create_single<D>(descriptor: D) -> CreateParams
-    where
-        D: IntoWalletDescriptor + Send + Clone + 'static,
-    {
-        CreateParams::new_single(descriptor)
-    }
-
+impl<K> Wallet<K>
+where K: Ord
+{
     /// Build a new [`Wallet`].
     ///
     /// If you have previously created a wallet, use [`load`](Self::load) instead.
@@ -242,11 +197,9 @@ impl Wallet {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn create<D>(descriptor: D, change_descriptor: D) -> CreateParams
-    where
-        D: IntoWalletDescriptor + Send + Clone + 'static,
+    pub fn create(network: Network) -> CreateParams<K>
     {
-        CreateParams::new(descriptor, change_descriptor)
+        CreateParams::new(network)
     }
 
     /// Build a new [`Wallet`] from a two-path descriptor.

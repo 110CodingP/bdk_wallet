@@ -1,93 +1,30 @@
-use alloc::{boxed::Box, collections::btree_map::BTreeMap};
+use alloc::{ collections::btree_map::BTreeMap};
 
 use bdk_chain::keychain_txout::DEFAULT_LOOKAHEAD;
-use bitcoin::{BlockHash, Network, NetworkKind};
+use bitcoin::{BlockHash, Network, constants::genesis_block};
+use bitcoin::secp256k1::Secp256k1;
 use miniscript::descriptor::KeyMap;
 use miniscript::{Descriptor, DescriptorPublicKey};
 
 use crate::{
-    descriptor::{DescriptorError, ExtendedDescriptor, IntoWalletDescriptor},
-    utils::SecpCtx,
+    descriptor::{DescriptorError, IntoWalletDescriptor, check_wallet_descriptor},
     AsyncWalletPersister, CreateWithPersistError, KeychainKind, LoadWithPersistError, Wallet,
     WalletPersister,
 };
 
 use super::{ChangeSet, LoadError, PersistedWallet};
 
-fn make_two_path_descriptor_to_extract<D>(
-    two_path_descriptor: D,
-    index: usize,
-) -> DescriptorToExtract
-where
-    D: IntoWalletDescriptor + Send + 'static,
-{
-    Box::new(move |secp, network| {
-        let (desc, keymap) = two_path_descriptor.into_wallet_descriptor(secp, network)?;
-
-        if !desc.is_multipath() {
-            return Err(DescriptorError::MultiPath);
-        }
-
-        let descriptors = desc
-            .into_single_descriptors()
-            .map_err(DescriptorError::Miniscript)?;
-
-        if descriptors.len() != 2 {
-            return Err(DescriptorError::MultiPath);
-        }
-
-        Ok((descriptors[index].clone(), keymap))
-    })
-}
-
-/// This atrocity is to avoid having type parameters on [`CreateParams`] and [`LoadParams`].
-///
-/// The better option would be to do `Box<dyn IntoWalletDescriptor>`, but we cannot due to Rust's
-/// [object safety rules](https://doc.rust-lang.org/reference/items/traits.html#object-safety).
-type DescriptorToExtract = Box<
-    dyn FnOnce(&SecpCtx, NetworkKind) -> Result<(ExtendedDescriptor, KeyMap), DescriptorError>
-        + Send
-        + 'static,
->;
-
-fn make_descriptor_to_extract<D>(descriptor: D) -> DescriptorToExtract
-where
-    D: IntoWalletDescriptor + Send + 'static,
-{
-    Box::new(|secp, network_kind| descriptor.into_wallet_descriptor(secp, network_kind))
-}
-
 /// Parameters for [`Wallet::create`] or [`PersistedWallet::create`].
 #[must_use]
 pub struct CreateParams<K> {
     pub(crate) descriptors: BTreeMap<K, Descriptor<DescriptorPublicKey>>,
     pub(crate) network: Network,
-    pub(crate) genesis_hash: Option<BlockHash>,
+    pub(crate) genesis_hash: BlockHash,
     pub(crate) lookahead: u32,
     pub(crate) use_spk_cache: bool,
 }
 
 impl<K: Ord> CreateParams<K> {
-    /// Construct parameters with provided `descriptor`.
-    ///
-    /// Default values:
-    /// * `change_descriptor` = `None`
-    /// * `network` = [`Network::Bitcoin`]
-    /// * `genesis_hash` = `None`
-    /// * `lookahead` = [`DEFAULT_LOOKAHEAD`]
-    ///
-    /// Use this method only when building a wallet with a single descriptor. See
-    /// also [`Wallet::create_single`].
-    pub fn new_single<D: IntoWalletDescriptor + Send + 'static>(descriptor: D) -> Self {
-        Self {
-            descriptor: make_descriptor_to_extract(descriptor),
-            change_descriptor: None,
-            network: Network::Bitcoin,
-            genesis_hash: None,
-            lookahead: DEFAULT_LOOKAHEAD,
-            use_spk_cache: false,
-        }
-    }
 
     /// Construct parameters with provided `descriptor` and `change_descriptor`.
     ///
@@ -95,52 +32,21 @@ impl<K: Ord> CreateParams<K> {
     /// * `network` = [`Network::Bitcoin`]
     /// * `genesis_hash` = `None`
     /// * `lookahead` = [`DEFAULT_LOOKAHEAD`]
-    pub fn new<D: IntoWalletDescriptor + Send + 'static>(
-        descriptor: D,
-        change_descriptor: D,
+    pub fn new(
+        network: Network
     ) -> Self {
         Self {
-            descriptor: make_descriptor_to_extract(descriptor),
-            change_descriptor: Some(make_descriptor_to_extract(change_descriptor)),
-            network: Network::Bitcoin,
-            genesis_hash: None,
+            descriptors: Default::default(),
+            network,
+            genesis_hash: genesis_block(network).block_hash(),
             lookahead: DEFAULT_LOOKAHEAD,
             use_spk_cache: false,
         }
-    }
-
-    /// Construct parameters with a two-path descriptor that will be parsed into receive and change
-    /// descriptors.
-    ///
-    /// This function parses a two-path descriptor (receive and change) and creates parameters
-    /// using the existing receive and change wallet creation logic.
-    ///
-    /// Default values:
-    /// * `network` = [`Network::Bitcoin`]
-    /// * `genesis_hash` = `None`
-    /// * `lookahead` = [`DEFAULT_LOOKAHEAD`]
-    pub fn new_two_path<D: IntoWalletDescriptor + Send + Clone + 'static>(
-        two_path_descriptor: D,
-    ) -> Self {
-        Self {
-            descriptor: make_two_path_descriptor_to_extract(two_path_descriptor.clone(), 0),
-            change_descriptor: Some(make_two_path_descriptor_to_extract(two_path_descriptor, 1)),
-            network: Network::Bitcoin,
-            genesis_hash: None,
-            lookahead: DEFAULT_LOOKAHEAD,
-            use_spk_cache: false,
-        }
-    }
-
-    /// Set [`Self::network`].
-    pub fn network(mut self, network: Network) -> Self {
-        self.network = network;
-        self
     }
 
     /// Use a custom `genesis_hash`.
     pub fn genesis_hash(mut self, genesis_hash: BlockHash) -> Self {
-        self.genesis_hash = Some(genesis_hash);
+        self.genesis_hash = genesis_hash;
         self
     }
 
@@ -162,6 +68,16 @@ impl<K: Ord> CreateParams<K> {
     pub fn use_spk_cache(mut self, use_spk_cache: bool) -> Self {
         self.use_spk_cache = use_spk_cache;
         self
+    }
+
+    pub fn add_descriptors<D: IntoWalletDescriptor>(mut self, descriptors: impl Into<BTreeMap<K, D>>) -> Result<(), DescriptorError>{
+        let secp = Secp256k1::new();
+        for (keychain, desc) in descriptors.into() {
+            let descriptor = desc.into_wallet_descriptor(&secp, self.network.into())?.0;
+            check_wallet_descriptor(&descriptor)?;
+            self.descriptors.insert(keychain, descriptor);
+        }
+        Ok(())
     }
 
     /// Create [`PersistedWallet`] with the given [`WalletPersister`].
@@ -187,14 +103,14 @@ impl<K: Ord> CreateParams<K> {
     }
 
     /// Create [`Wallet`] without persistence.
-    pub fn create_wallet_no_persist(self) -> Result<Wallet, DescriptorError> {
+    pub fn create_wallet_no_persist(self) -> Result<Wallet<K>, DescriptorError> {
         Wallet::create_with_params(self)
     }
 }
 
 /// Parameters for [`Wallet::load`] or [`PersistedWallet::load`].
 #[must_use]
-pub struct LoadParams {
+pub struct LoadParams<K> {
     pub(crate) lookahead: u32,
     pub(crate) check_network: Option<Network>,
     pub(crate) check_genesis_hash: Option<BlockHash>,
@@ -203,7 +119,7 @@ pub struct LoadParams {
     pub(crate) use_spk_cache: bool,
 }
 
-impl LoadParams {
+impl<K: Ord> LoadParams<K> {
     /// Construct parameters with default values.
     ///
     /// Default values: `lookahead` = [`DEFAULT_LOOKAHEAD`]
@@ -216,16 +132,6 @@ impl LoadParams {
             check_change_descriptor: None,
             use_spk_cache: false,
         }
-    }
-
-    /// Extend the given `keychain`'s `keymap`.
-    pub fn keymap(mut self, keychain: KeychainKind, keymap: KeyMap) -> Self {
-        match keychain {
-            KeychainKind::External => &mut self.descriptor_keymap,
-            KeychainKind::Internal => &mut self.change_descriptor_keymap,
-        }
-        .extend(keymap);
-        self
     }
 
     /// Checks the `expected_descriptor` matches exactly what is loaded for `keychain`.
@@ -323,7 +229,7 @@ impl LoadParams {
     }
 
     /// Load [`Wallet`] without persistence.
-    pub fn load_wallet_no_persist(self, changeset: ChangeSet) -> Result<Option<Wallet>, LoadError> {
+    pub fn load_wallet_no_persist(self, changeset: ChangeSet<K>) -> Result<Option<Wallet<K>>, LoadError> {
         Wallet::load_with_params(changeset, self)
     }
 }
