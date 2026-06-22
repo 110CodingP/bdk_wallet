@@ -2,11 +2,11 @@ use bdk_bitcoind_rpc::{
     bitcoincore_rpc::{Auth, Client, RpcApi},
     Emitter, MempoolEvent,
 };
-use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{
     bitcoin::{Block, Network},
     KeychainKind, Wallet,
 };
+use bdk_wallet::{rusqlite::Connection, KeyRing};
 use clap::{self, Parser};
 use std::{
     path::PathBuf,
@@ -97,26 +97,31 @@ fn main() -> anyhow::Result<()> {
     let wallet_opt = Wallet::load()
         .descriptor(KeychainKind::External, Some(args.descriptor.clone()))
         .descriptor(KeychainKind::Internal, args.change_descriptor.clone())
-        .extract_keys()
         .check_network(args.network)
         .load_wallet(&mut db)?;
     let mut wallet = match wallet_opt {
         Some(wallet) => wallet,
-        None => match &args.change_descriptor {
-            Some(change_desc) => Wallet::create(args.descriptor.clone(), change_desc.clone())
-                .network(args.network)
-                .create_wallet(&mut db)?,
-            None => Wallet::create_single(args.descriptor.clone())
-                .network(args.network)
-                .create_wallet(&mut db)?,
-        },
+        None => {
+            let mut keyring = KeyRing::new(args.network);
+            keyring.add_descriptor(KeychainKind::External, args.descriptor.clone())?;
+            match &args.change_descriptor {
+                Some(change_desc) => {
+                    keyring.add_descriptor(KeychainKind::Internal, change_desc.clone())?;
+                    keyring.into_params()?.create_wallet(&mut db)?
+                }
+                None => keyring.into_params()?.create_wallet(&mut db)?,
+            }
+        }
     };
     println!(
         "Loaded wallet in {}s",
         start_load_wallet.elapsed().as_secs_f32()
     );
 
-    let address = wallet.reveal_next_address(KeychainKind::External).address;
+    let address = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist")
+        .address;
     println!("Wallet address: {address}");
 
     let balance = wallet.balance();
