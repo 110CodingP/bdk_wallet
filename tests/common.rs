@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use bdk_wallet::descriptor::{IntoWalletDescriptor, Policy};
 use bitcoin::secp256k1::Secp256k1;
 use miniscript::{descriptor::KeyMap, Descriptor, DescriptorPublicKey};
 
@@ -114,4 +115,39 @@ macro_rules! assert_fee_rate_legacy {
                 "Expected fee rate of at least {:?}, the tx has {:?}", fee_rate, tx_fee_rate);
         }
     });
+}
+use bdk_wallet::{KeychainKind, Wallet};
+
+pub fn get_signers(
+    desc: impl IntoWalletDescriptor,
+    wallet: &Wallet<KeychainKind>,
+) -> bdk_wallet::signer::SignersContainer {
+    use bdk_wallet::descriptor::IntoWalletDescriptor;
+    use bdk_wallet::signer::SignersContainer;
+
+    let (descriptor, keymap) = desc
+        .into_wallet_descriptor(wallet.secp_ctx(), wallet.network().into())
+        .unwrap();
+    SignersContainer::build(keymap, &descriptor, wallet.secp_ctx())
+}
+
+pub fn get_policy(
+    desc: impl IntoWalletDescriptor,
+    wallet: &bdk_wallet::Wallet<KeychainKind>,
+) -> Policy {
+    use bdk_wallet::descriptor::IntoWalletDescriptor;
+    use bdk_wallet::descriptor::{policy::BuildSatisfaction, ExtractPolicy};
+    use bdk_wallet::signer::SignersContainer;
+
+    let (descriptor, keymap) = desc
+        .into_wallet_descriptor(wallet.secp_ctx(), wallet.network().into())
+        .unwrap();
+    descriptor
+        .extract_policy(
+            &SignersContainer::build(keymap, &descriptor, wallet.secp_ctx()),
+            BuildSatisfaction::None,
+            wallet.secp_ctx(),
+        )
+        .unwrap()
+        .unwrap()
 }

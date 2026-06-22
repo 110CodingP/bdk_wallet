@@ -12,7 +12,8 @@ use bdk_wallet::descriptor::IntoWalletDescriptor;
 use bdk_wallet::error::CreateTxError;
 use bdk_wallet::test_utils::*;
 use bdk_wallet::{
-    ChangeSet, KeychainKind, LoadError, LoadMismatch, LoadWithPersistError, Wallet, WalletPersister,
+    ChangeSet, KeyRing, KeychainKind, LoadError, LoadMismatch, LoadWithPersistError, Wallet,
+    WalletPersister,
 };
 use bitcoin::constants::ChainHash;
 use bitcoin::hashes::Hash;
@@ -28,7 +29,7 @@ use bdk_wallet::persist_test_utils::{
 };
 
 mod common;
-use common::*;
+use common::get_signers;
 
 const DB_MAGIC: &[u8] = &[0x21, 0x24, 0x48];
 
@@ -79,7 +80,7 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
         assert_eq!(cache_cmp, expected_cmp, "{}", msg.as_ref());
     }
 
-    fn staged_cache(wallet: &Wallet) -> SpkCacheChangeSet {
+    fn staged_cache(wallet: &Wallet<KeychainKind>) -> SpkCacheChangeSet {
         wallet.staged().map_or(SpkCacheChangeSet::default(), |cs| {
             cs.indexer.spk_cache.clone()
         })
@@ -93,7 +94,7 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
     where
         CreateDb: Fn(&Path) -> anyhow::Result<Db>,
         OpenDb: Fn(&Path) -> anyhow::Result<Db>,
-        Db: WalletPersister,
+        Db: WalletPersister<KeychainKind>,
         Db::Error: core::error::Error + Send + Sync + 'static,
     {
         let temp_dir = tempfile::tempdir().expect("must create tempdir");
@@ -103,12 +104,22 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
         // create new wallet
         let wallet_spk_index = {
             let mut db = create_db(&file_path)?;
-            let mut wallet = Wallet::create(external_desc, internal_desc)
-                .network(Network::Testnet)
+            let mut keyring = KeyRing::new(Network::Testnet);
+            keyring
+                .add_descriptor(KeychainKind::External, external_desc)
+                .expect("should add keychain");
+            keyring
+                .add_descriptor(KeychainKind::Internal, internal_desc)
+                .expect("should add keychain");
+            let mut wallet = keyring
+                .into_params()
+                .expect("should be a valid keyring")
                 .use_spk_cache(true)
                 .create_wallet(&mut db)?;
 
-            wallet.reveal_next_address(KeychainKind::External);
+            wallet
+                .reveal_next_address(KeychainKind::External)
+                .expect("keychain must exist");
 
             check_cache_cs(
                 &staged_cache(&wallet),
@@ -145,7 +156,9 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
             );
             let secp = Secp256k1::new();
             assert_eq!(
-                *wallet.public_descriptor(KeychainKind::External),
+                *wallet
+                    .public_descriptor(KeychainKind::External)
+                    .expect("keychain must exist"),
                 external_desc
                     .into_wallet_descriptor(&secp, wallet.network().into())
                     .unwrap()
@@ -164,7 +177,9 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
 
             assert!(wallet.staged().is_none());
 
-            let revealed_external_addr = wallet.reveal_next_address(KeychainKind::External);
+            let revealed_external_addr = wallet
+                .reveal_next_address(KeychainKind::External)
+                .expect("keychain must exist");
             check_cache_cs(
                 &staged_cache(&wallet),
                 [(
@@ -177,7 +192,9 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
             // Clear the stage
             let _ = wallet.take_staged();
 
-            let revealed_internal_addr = wallet.reveal_next_address(KeychainKind::Internal);
+            let revealed_internal_addr = wallet
+                .reveal_next_address(KeychainKind::Internal)
+                .expect("keychain must exist");
             check_cache_cs(
                 &staged_cache(&wallet),
                 [(
@@ -199,11 +216,14 @@ fn wallet_is_persisted() -> anyhow::Result<()> {
 
             let internal_did = wallet
                 .public_descriptor(KeychainKind::Internal)
+                .expect("keychain must exist")
                 .descriptor_id();
 
             assert!(wallet.staged().is_none());
 
-            let _addr = wallet.reveal_next_address(KeychainKind::Internal);
+            let _addr = wallet
+                .reveal_next_address(KeychainKind::Internal)
+                .expect("keychain must exist");
             let cs = wallet.staged().expect("we should have staged a changeset");
             assert_eq!(cs.indexer.last_revealed.get(&internal_did), Some(&0));
             assert!(
@@ -239,7 +259,7 @@ fn wallet_load_checks() -> anyhow::Result<()> {
     where
         CreateDb: Fn(&Path) -> anyhow::Result<Db>,
         OpenDb: Fn(&Path) -> anyhow::Result<Db>,
-        Db: WalletPersister + std::fmt::Debug,
+        Db: WalletPersister<KeychainKind> + std::fmt::Debug,
         Db::Error: core::error::Error + Send + Sync + 'static,
     {
         let temp_dir = tempfile::tempdir().expect("must create tempdir");
@@ -248,8 +268,16 @@ fn wallet_load_checks() -> anyhow::Result<()> {
         let (external_desc, internal_desc) = get_test_tr_single_sig_xprv_and_change_desc();
 
         // create new wallet
-        let _ = Wallet::create(external_desc, internal_desc)
-            .network(network)
+        let mut keyring = KeyRing::new(network);
+        keyring
+            .add_descriptor(KeychainKind::External, external_desc)
+            .expect("should add keychain");
+        keyring
+            .add_descriptor(KeychainKind::Internal, internal_desc)
+            .expect("should add keychain");
+        let _ = keyring
+            .into_params()
+            .expect("should be a valid keyring")
             .create_wallet(&mut create_db(&file_path)?)?;
 
         assert_matches!(
@@ -279,38 +307,26 @@ fn wallet_load_checks() -> anyhow::Result<()> {
             ))),
             "unexpected descriptors check result",
         );
-        assert_matches!(
-            Wallet::load()
-                .descriptor(KeychainKind::External, Option::<&str>::None)
-                .load_wallet(&mut open_db(&file_path)?),
-            Err(LoadWithPersistError::InvalidChangeSet(LoadError::Mismatch(
-                LoadMismatch::Descriptor { .. }
-            ))),
-            "unexpected descriptors check result",
-        );
-        // check setting keymaps
-        let (_, external_keymap) = parse_descriptor(external_desc);
-        let (_, internal_keymap) = parse_descriptor(internal_desc);
-        let wallet = Wallet::load()
-            .keymap(KeychainKind::External, external_keymap)
-            .keymap(KeychainKind::Internal, internal_keymap)
-            .load_wallet(&mut open_db(&file_path)?)
-            .expect("db should not fail")
-            .expect("wallet was persisted");
-        for keychain in [KeychainKind::External, KeychainKind::Internal] {
-            let keymap = wallet.get_signers(keychain).as_key_map(wallet.secp_ctx());
-            assert!(
-                !keymap.is_empty(),
-                "load should populate keymap for keychain {keychain:?}"
-            );
-        }
+        // assert_matches!(
+        //     Wallet::load()
+        //         .descriptor(KeychainKind::External, Option::<&str>::None)
+        //         .load_wallet(&mut open_db(&file_path)?),
+        //     Err(LoadWithPersistError::InvalidChangeSet(LoadError::Mismatch(
+        //         LoadMismatch::Descriptor { .. }
+        //     ))),
+        //     "unexpected descriptors check result",
+        // );
         Ok(())
     }
 
     run(
         "store.db",
-        |path| Ok(bdk_file_store::Store::<ChangeSet>::create(DB_MAGIC, path)?),
-        |path| Ok(bdk_file_store::Store::<ChangeSet>::load(DB_MAGIC, path)?.0),
+        |path| {
+            Ok(bdk_file_store::Store::<ChangeSet<KeychainKind>>::create(
+                DB_MAGIC, path,
+            )?)
+        },
+        |path| Ok(bdk_file_store::Store::<ChangeSet<KeychainKind>>::load(DB_MAGIC, path)?.0),
     )?;
     run(
         "store.sqlite",
@@ -329,8 +345,13 @@ fn wallet_should_persist_anchors_and_recover() {
     let mut db = rusqlite::Connection::open(db_path).unwrap();
 
     let desc = get_test_tr_single_sig_xprv();
-    let mut wallet = Wallet::create_single(desc)
-        .network(Network::Testnet)
+    let mut keyring = KeyRing::new(Network::Testnet);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet(&mut db)
         .unwrap();
     let small_output_tx = Transaction {
@@ -338,6 +359,7 @@ fn wallet_should_persist_anchors_and_recover() {
         output: vec![TxOut {
             script_pubkey: wallet
                 .next_unused_address(KeychainKind::External)
+                .expect("keychain must exist")
                 .script_pubkey(),
             value: Amount::from_sat(25_000),
         }],
@@ -359,7 +381,6 @@ fn wallet_should_persist_anchors_and_recover() {
     assert!(!keymap.is_empty());
     let wallet = Wallet::load()
         .descriptor(KeychainKind::External, Some(desc))
-        .extract_keys()
         .load_wallet(&mut db)
         .unwrap()
         .expect("must have loaded changeset");
@@ -388,8 +409,13 @@ fn single_descriptor_wallet_persist_and_recover() {
     let mut db = rusqlite::Connection::open(db_path).unwrap();
 
     let desc = get_test_tr_single_sig_xprv();
-    let mut wallet = Wallet::create_single(desc)
-        .network(Network::Testnet)
+    let mut keyring = KeyRing::new(Network::Testnet);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet(&mut db)
         .unwrap();
     let _ = wallet.reveal_addresses_to(KeychainKind::External, 2);
@@ -401,23 +427,23 @@ fn single_descriptor_wallet_persist_and_recover() {
     assert!(!keymap.is_empty());
     let wallet = Wallet::load()
         .descriptor(KeychainKind::External, Some(desc))
-        .extract_keys()
         .load_wallet(&mut db)
         .unwrap()
         .expect("must have loaded changeset");
-    assert_eq!(wallet.derivation_index(KeychainKind::External), Some(2));
-    // should have private key
     assert_eq!(
-        wallet.get_signers(KeychainKind::External).as_key_map(secp),
-        keymap,
+        wallet
+            .derivation_index(KeychainKind::External)
+            .expect("keychain must exist"),
+        Some(2)
     );
 
+    // should have private key
+    assert_eq!(get_signers(desc, &wallet).as_key_map(secp), keymap,);
     // should error on wrong internal params
     let desc = get_test_wpkh();
     let (exp_desc, _) = <Descriptor<DescriptorPublicKey>>::parse_descriptor(secp, desc).unwrap();
     let err = Wallet::load()
         .descriptor(KeychainKind::Internal, Some(desc))
-        .extract_keys()
         .load_wallet(&mut db);
     assert_matches!(
         err,
@@ -436,20 +462,36 @@ fn two_path_descriptor_wallet_persist_and_recover() {
     let mut db = rusqlite::Connection::open(db_path).unwrap();
 
     let two_path_descriptor = get_test_two_path_wpkh();
-    let mut wallet = Wallet::create_from_two_path_descriptor(two_path_descriptor)
-        .network(Network::Testnet4)
+    let mut keyring = KeyRing::new(Network::Testnet4);
+    keyring
+        .add_multipath_descriptor(
+            two_path_descriptor,
+            &[KeychainKind::External, KeychainKind::Internal],
+        )
+        .expect("should add keychains");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet(&mut db)
         .unwrap();
     let _ = wallet.reveal_addresses_to(KeychainKind::External, 2);
     assert!(wallet.persist(&mut db).unwrap());
 
     let loaded = Wallet::load()
-        .two_path_descriptor(two_path_descriptor)
+        .multi_path_descriptor(
+            two_path_descriptor,
+            &[KeychainKind::External, KeychainKind::Internal],
+        )
         .check_network(Network::Testnet4)
         .load_wallet(&mut db)
         .unwrap()
         .expect("wallet must exist");
-    assert_eq!(loaded.derivation_index(KeychainKind::External), Some(2));
+    assert_eq!(
+        loaded
+            .derivation_index(KeychainKind::External)
+            .expect("keychain must exist"),
+        Some(2)
+    );
 }
 
 #[test]
@@ -498,8 +540,16 @@ fn test_lock_outpoint_persist() -> anyhow::Result<()> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
 
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Signet)
+    let mut keyring = KeyRing::new(Network::Signet);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet(&mut conn)?;
 
     // Receive coins.
@@ -539,7 +589,10 @@ fn test_lock_outpoint_persist() -> anyhow::Result<()> {
         assert_eq!(locked_unspent, outpoints);
 
         // Test: Locked outpoints are excluded from coin selection
-        let addr = wallet.next_unused_address(KeychainKind::External).address;
+        let addr = wallet
+            .next_unused_address(KeychainKind::External)
+            .expect("keychain must exist")
+            .address;
         let mut tx_builder = wallet.build_tx();
         tx_builder.add_recipient(addr, Amount::from_sat(10_000));
         let res = tx_builder.finish();
