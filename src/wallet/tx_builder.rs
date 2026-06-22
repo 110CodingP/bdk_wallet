@@ -111,7 +111,7 @@ use crate::{KeychainKind, LocalOutput, Utxo, WeightedUtxo};
 /// [`coin_selection`]: Self::coin_selection
 #[derive(Debug)]
 pub struct TxBuilder<'a, Cs> {
-    pub(crate) wallet: &'a mut Wallet,
+    pub(crate) wallet: &'a mut Wallet<KeychainKind>,
     pub(crate) params: TxParams,
     pub(crate) coin_selection: Cs,
 }
@@ -220,8 +220,7 @@ impl<'a, Cs> TxBuilder<'a, Cs> {
     ///   in order to spend an `OP_CLTV` branch.
     /// * If fragments `2` and `3` are used, the transaction will need both.
     ///
-    /// When the spending policy is represented as a tree (see
-    /// [`Wallet::policies`](super::Wallet::policies)), every node
+    /// When the spending policy is represented as a tree  every node
     /// is assigned a unique identifier that can be used in the policy path to specify which of
     /// the node's children the user intends to satisfy: for instance, assuming the `thresh()`
     /// root node of this example has an id of `aabbccdd`, the policy path map would look like:
@@ -279,7 +278,7 @@ impl<'a, Cs> TxBuilder<'a, Cs> {
     /// If a UTXO is inserted multiple times, only the final insertion will take effect.
     pub fn add_utxos(&mut self, outpoints: &[OutPoint]) -> Result<&mut Self, AddUtxoError> {
         // Canonicalize once, instead of once for every call to `get_utxo`.
-        let unspent: HashMap<OutPoint, LocalOutput> = self
+        let unspent: HashMap<OutPoint, LocalOutput<KeychainKind>> = self
             .wallet
             .list_unspent()
             .map(|output| (output.outpoint, output))
@@ -300,6 +299,7 @@ impl<'a, Cs> TxBuilder<'a, Cs> {
                     satisfaction_weight: self
                         .wallet
                         .public_descriptor(output.keychain)
+                        .expect("keychain must exist")
                         .max_weight_to_satisfy()
                         .expect("descriptor should be satisfiable"),
                     utxo: Utxo::Local(output),
@@ -902,7 +902,7 @@ pub enum ChangeSpendPolicy {
 }
 
 impl ChangeSpendPolicy {
-    pub(crate) fn is_satisfied_by(&self, utxo: &LocalOutput) -> bool {
+    pub(crate) fn is_satisfied_by(&self, utxo: &LocalOutput<KeychainKind>) -> bool {
         match self {
             ChangeSpendPolicy::ChangeAllowed => true,
             ChangeSpendPolicy::OnlyChange => utxo.keychain == KeychainKind::Internal,
@@ -928,6 +928,7 @@ mod test {
     }
 
     use crate::test_utils::*;
+    use crate::KeyRing;
     use bitcoin::consensus::deserialize;
     use bitcoin::hex::FromHex;
     use bitcoin::TxOut;
@@ -1075,7 +1076,7 @@ mod test {
         assert_ne!(tx_2, original_tx);
     }
 
-    fn get_test_utxos() -> Vec<LocalOutput> {
+    fn get_test_utxos() -> Vec<LocalOutput<KeychainKind>> {
         use bitcoin::hashes::Hash;
 
         vec![
@@ -1156,11 +1157,19 @@ mod test {
         use bdk_chain::BlockId;
         use bitcoin::{hashes::Hash, BlockHash, Network};
 
-        let mut wallet = Wallet::create_single(get_test_tr_single_sig())
-            .network(Network::Regtest)
+        let mut keyring = KeyRing::new(Network::Regtest);
+        keyring
+            .add_descriptor(KeychainKind::External, get_test_tr_single_sig())
+            .expect("should add keychain");
+        let mut wallet = keyring
+            .into_params()
+            .expect("should be a valid keyring")
             .create_wallet_no_persist()
             .unwrap();
-        let recipient = wallet.next_unused_address(KeychainKind::External).address;
+        let recipient = wallet
+            .next_unused_address(KeychainKind::External)
+            .expect("keychain must exist")
+            .address;
 
         insert_checkpoint(
             &mut wallet,
@@ -1245,8 +1254,13 @@ mod test {
         use bdk_chain::BlockId;
         use bitcoin::{hashes::Hash, BlockHash, Network};
 
-        let mut wallet = Wallet::create_single(get_test_tr_single_sig())
-            .network(Network::Regtest)
+        let mut keyring = KeyRing::new(Network::Regtest);
+        keyring
+            .add_descriptor(KeychainKind::External, get_test_tr_single_sig())
+            .expect("should add keychain");
+        let mut wallet = keyring
+            .into_params()
+            .expect("should be a valid keyring")
             .create_wallet_no_persist()
             .unwrap();
 
@@ -1316,10 +1330,19 @@ mod test {
     // This test demonstrates that `add_utxo` only considers the final insertion.
     #[test]
     fn test_add_utxo_final_outpoint_retained() {
+        use bitcoin::Network;
         // Create empty wallet
         let (desc, change_desc) = get_test_wpkh_and_change_desc();
-        let mut wallet = Wallet::create(desc, change_desc)
-            .network(bdk_wallet::bitcoin::Network::Regtest)
+        let mut keyring = KeyRing::new(Network::Regtest);
+        keyring
+            .add_descriptor(KeychainKind::External, desc)
+            .expect("should add keychain");
+        keyring
+            .add_descriptor(KeychainKind::Internal, change_desc)
+            .expect("should add keychain");
+        let mut wallet = keyring
+            .into_params()
+            .expect("should be a valid keyring")
             .create_wallet_no_persist()
             .unwrap();
 
@@ -1334,7 +1357,10 @@ mod test {
             ReceiveTo::Mempool(100),
         );
 
-        let send_to = wallet.next_unused_address(KeychainKind::External).address;
+        let send_to = wallet
+            .next_unused_address(KeychainKind::External)
+            .expect("keychain must exist")
+            .address;
         let mut tx_builder = wallet.build_tx();
         tx_builder
             .add_utxo(outpoint_0)
@@ -1373,6 +1399,7 @@ mod test {
 
         let satisfaction_weight = wallet1
             .public_descriptor(KeychainKind::External)
+            .expect("keychain must exist")
             .max_weight_to_satisfy()
             .unwrap();
 
