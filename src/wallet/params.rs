@@ -364,3 +364,179 @@ impl Default for LoadParams {
         Self::new()
     }
 }
+
+/// Container for the wallet descriptors and network during wallet creation.
+#[derive(Debug, Clone)]
+pub struct KeyRing<K> {
+    // The secp context.
+    secp: SecpCtx,
+    // [`Wallet`]'s network.
+    network: Network,
+    // [`Wallet`]'s descriptors.
+    keychains: BTreeMap<K, Descriptor<DescriptorPublicKey>>,
+    // For quick membership check when adding descriptors.
+    // Not expecting this to be large.
+    descriptors: BTreeSet<Descriptor<DescriptorPublicKey>>,
+}
+
+impl<K> KeyRing<K>
+where
+    K: Ord + Clone + Debug,
+{
+    /// Construct a new [`KeyRing`] with the provided network.
+    ///
+    /// To add descriptors use [`KeyRing::add_descriptor`].
+    pub fn new(network: Network) -> Self {
+        Self {
+            secp: SecpCtx::new(),
+            network,
+            keychains: BTreeMap::default(),
+            descriptors: BTreeSet::default(),
+        }
+    }
+
+    /// Get the [`Network`] corresponding to the [`KeyRing`]
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
+    /// Adds a descriptor (non-multipath) to the [`KeyRing`].
+    ///
+    /// This method returns an error if the provided descriptor is multipath,
+    /// contains hardened derivation steps (in case of public descriptors) or
+    /// fails miniscripts sanity checks. It also returns an error when
+    /// one of `keychain` or `descriptor` is already in the keyring.
+    pub fn add_descriptor(
+        &mut self,
+        keychain: K,
+        descriptor: impl IntoWalletDescriptor,
+    ) -> Result<(), InitError<K>> {
+        let descriptor = descriptor
+            .into_wallet_descriptor(&self.secp, self.network.into())?
+            .0;
+        check_wallet_descriptor(&descriptor)?;
+
+        if self.keychains.contains_key(&keychain) {
+            return Err(InitError::KeychainAlreadyExists(Box::new(keychain)));
+        }
+
+        if self.descriptors.contains(&descriptor) {
+            return Err(InitError::DescAlreadyExists(Box::new(descriptor)));
+        }
+
+        self.keychains.insert(keychain, descriptor.clone());
+        self.descriptors.insert(descriptor);
+
+        Ok(())
+    }
+
+    /// Adds a multipath descriptor to the [`KeyRing`] where each descriptor extracted
+    /// is paired with a keychain in `keychains` in order.
+    ///
+    /// Note: It is guaranteed that the addition of the single path keychains to the keyring is
+    /// atomic.
+    ///
+    /// This method returns an error if the provided descriptor is not multipath,
+    /// contains hardened derivation steps (in case of public descriptors) or
+    /// fails miniscripts sanity checks. It also returns an error when one of `keychain`
+    /// or one of the extracted descriptors is already in the keyring or when the multipath
+    /// `descriptor` cannot be expanded to as many single path descriptors as `keychains`.
+    pub fn add_multipath_descriptor(
+        &mut self,
+        descriptor: impl IntoWalletDescriptor,
+        keychains: &[K],
+    ) -> Result<(), InitError<K>> {
+        self.add_multipath_descriptor_with_range(descriptor, keychains, ..)
+    }
+
+    /// Adds a multipath descriptor to the [`KeyRing`] where descriptors in the given `range` are
+    /// extracted and are paired with a keychain in `keychains` in order.
+    ///
+    /// This method returns an error if the provided descriptor is not multipath,
+    /// contains hardened derivation steps (in case of public descriptors) or
+    /// fails miniscripts sanity checks. It also returns an error when one of `keychain`
+    /// or one of the extracted descriptors is already in the keyring, when the multipath
+    /// `descriptor` cannot be expanded to as many single path descriptors as `keychains`
+    /// or when the provided `range` is out of bounds.
+    fn add_multipath_descriptor_with_range(
+        &mut self,
+        descriptor: impl IntoWalletDescriptor,
+        keychains: &[K],
+        range: core::ops::RangeFull,
+    ) -> Result<(), InitError<K>> {
+        let descriptor = descriptor
+            .into_wallet_descriptor(&self.secp, self.network.into())?
+            .0;
+
+        if !descriptor.is_multipath() {
+            return Err(DescriptorError::MultiPath)?;
+        }
+
+        let descriptors = extract_from_multipath(descriptor)?
+            .get(range)
+            .ok_or(DescriptorError::MultiPath)?
+            .to_vec();
+
+        if descriptors.len() < keychains.len() {
+            return Err(DescriptorError::MultiPath)?;
+        }
+
+        for keychain in keychains {
+            if self.keychains.contains_key(keychain) {
+                return Err(InitError::KeychainAlreadyExists(Box::new(keychain.clone())));
+            }
+        }
+
+        for descriptor in descriptors.iter() {
+            if self.descriptors.contains(descriptor) {
+                return Err(InitError::DescAlreadyExists(Box::new(descriptor.clone())));
+            }
+        }
+
+        for (keychain, descriptor) in keychains.iter().zip(descriptors) {
+            self.keychains.insert(keychain.clone(), descriptor.clone());
+            self.descriptors.insert(descriptor);
+        }
+
+        Ok(())
+    }
+
+    /// Obtain corresponding [`CreateParams`] from the [`KeyRing`]
+    ///
+    /// Returns an error if the keyring does not contain any keychains.
+    pub fn into_params(self) -> Result<CreateParams<K>, InitError<K>> {
+        // Guard against no-keychain case.
+        if self.descriptors.is_empty() {
+            return Err(InitError::NoKeychains);
+        };
+
+        Ok(CreateParams {
+            secp: self.secp,
+            descriptors: self.keychains,
+            network: self.network,
+            genesis_hash: None,
+            lookahead: DEFAULT_LOOKAHEAD,
+            use_spk_cache: false,
+        })
+    }
+
+    /// Get all the keychains on this [`KeyRing`].
+    pub fn list_keychains(&self) -> &BTreeMap<K, Descriptor<DescriptorPublicKey>> {
+        &self.keychains
+    }
+}
+
+// Extract single path descriptors from the `multipath_descriptor` in the given range.
+fn extract_from_multipath(
+    multipath_descriptor: Descriptor<DescriptorPublicKey>,
+) -> Result<Vec<Descriptor<DescriptorPublicKey>>, DescriptorError> {
+    let descriptors = multipath_descriptor
+        .into_single_descriptors()
+        .map_err(DescriptorError::Miniscript)?;
+
+    for descriptor in descriptors.iter() {
+        check_wallet_descriptor(descriptor)?;
+    }
+
+    Ok(descriptors)
+}
