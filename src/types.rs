@@ -56,17 +56,44 @@ impl AsRef<[u8]> for KeychainKind {
     }
 }
 
+#[cfg(feature = "rusqlite")]
+use chain::rusqlite::{
+    self,
+    types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef},
+};
+
+#[cfg(feature = "rusqlite")]
+impl FromSql for KeychainKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        Ok(match value.as_str()? {
+            "0" => KeychainKind::External,
+            "1" => KeychainKind::Internal,
+            _ => panic!("KeychainKind cannot be anything other than External(0) and Internal(1)"),
+        })
+    }
+}
+
+#[cfg(feature = "rusqlite")]
+impl ToSql for KeychainKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(match *self {
+            KeychainKind::External => "0".into(),
+            KeychainKind::Internal => "1".into(),
+        })
+    }
+}
+
 /// An unspent output owned by a [`Wallet`].
 ///
 /// [`Wallet`]: crate::Wallet
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LocalOutput {
+pub struct LocalOutput<K> {
     /// Reference to a transaction output
     pub outpoint: OutPoint,
     /// Transaction output
     pub txout: TxOut,
     /// Type of keychain
-    pub keychain: KeychainKind,
+    pub keychain: K,
     /// Whether this UTXO is spent or not
     pub is_spent: bool,
     /// The derivation index for the script pubkey in the wallet
@@ -92,7 +119,7 @@ pub struct WeightedUtxo {
 /// An unspent transaction output (UTXO).
 pub enum Utxo {
     /// A UTXO owned by the local wallet.
-    Local(LocalOutput),
+    Local(LocalOutput<KeychainKind>),
     /// A UTXO owned by another wallet.
     Foreign {
         /// The location of the output.

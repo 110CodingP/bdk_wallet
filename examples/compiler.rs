@@ -21,7 +21,7 @@ use bitcoin::Network;
 use miniscript::policy::Concrete;
 use miniscript::Descriptor;
 
-use bdk_wallet::{KeychainKind, Wallet};
+use bdk_wallet::{KeyRing, KeychainKind};
 
 /// Miniscript policy is a high level abstraction of spending conditions. Defined in the
 /// rust-miniscript library here  https://docs.rs/miniscript/7.0.0/miniscript/policy/index.html
@@ -56,23 +56,26 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Compiled into Descriptor: \n{descriptor}");
 
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring.add_descriptor(KeychainKind::External, descriptor)?;
+
     // Create a new wallet from descriptors
-    let mut wallet = Wallet::create_single(descriptor)
-        .network(Network::Regtest)
-        .create_wallet_no_persist()?;
+    let mut wallet = keyring.into_params()?.create_wallet_no_persist()?;
 
     println!(
         "First derived address from the descriptor: \n{}",
-        wallet.next_unused_address(KeychainKind::External),
+        wallet
+            .next_unused_address(KeychainKind::External)
+            .expect("keychain must exist"),
     );
 
-    // BDK also has it's own `Policy` structure to represent the spending condition in a more
-    // human readable json format.
-    let spending_policy = wallet.policies(KeychainKind::External)?;
-    println!(
-        "The BDK spending policy: \n{}",
-        serde_json::to_string_pretty(&spending_policy)?
-    );
+    // // BDK also has it's own `Policy` structure to represent the spending condition in a more
+    // // human readable json format.
+    // let spending_policy = wallet.policies(KeychainKind::External)?;
+    // println!(
+    //     "The BDK spending policy: \n{}",
+    //     serde_json::to_string_pretty(&spending_policy)?
+    // );
 
     Ok(())
 }

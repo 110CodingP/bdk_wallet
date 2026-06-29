@@ -34,6 +34,8 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::KeychainKind;
+
 const DESCRIPTORS: [&str; 4] = [
     "tr([5940b9b9/86'/0'/0']tpubDDVNqmq75GNPWQ9UNKfP43UwjaHU4GYfoPavojQbfpyfZp2KetWgjGBRRAy4tYCrAA6SB11mhQAkqxjh1VtQHyKwT4oYxpwLaGHvoKmtxZf/0/*)#44aqnlam",
     "tr([5940b9b9/86'/0'/0']tpubDDVNqmq75GNPWQ9UNKfP43UwjaHU4GYfoPavojQbfpyfZp2KetWgjGBRRAy4tYCrAA6SB11mhQAkqxjh1VtQHyKwT4oYxpwLaGHvoKmtxZf/1/*)#ypcpw2dr",
@@ -66,6 +68,16 @@ fn spk_at_index(descriptor: &Descriptor<DescriptorPublicKey>, index: u32) -> Scr
         .script_pubkey()
 }
 
+// Check equalit of changesets.
+fn check_changesets(changeset1: &ChangeSet<KeychainKind>, changeset2: &ChangeSet<KeychainKind>) {
+    assert_eq!(changeset1.network, changeset2.network);
+    assert_eq!(changeset1.local_chain, changeset2.local_chain);
+    assert_eq!(changeset1.tx_graph, changeset2.tx_graph);
+    assert_eq!(changeset1.indexer, changeset2.indexer);
+    assert_eq!(changeset1.locked_outpoints, changeset2.locked_outpoints);
+    assert_eq!(changeset1.descriptors, changeset2.descriptors);
+}
+
 /// tests if [`Wallet`] is being persisted correctly
 ///
 /// [`Wallet`]: <https://docs.rs/bdk_wallet/latest/bdk_wallet/struct.Wallet.html>
@@ -77,7 +89,7 @@ fn spk_at_index(descriptor: &Descriptor<DescriptorPublicKey>, index: u32) -> Scr
 pub fn persist_wallet_changeset<Store, CreateStore>(filename: &str, create_store: CreateStore)
 where
     CreateStore: Fn(&Path) -> anyhow::Result<Store>,
-    Store: WalletPersister,
+    Store: WalletPersister<KeychainKind>,
     Store::Error: Debug,
 {
     // create store
@@ -172,6 +184,11 @@ where
         tx_graph: tx_graph_changeset,
         indexer: keychain_txout_changeset,
         locked_outpoints: locked_outpoints_changeset,
+        descriptors: [
+            (KeychainKind::External, descriptor.clone()),
+            (KeychainKind::Internal, change_descriptor),
+        ]
+        .into(),
     };
 
     // persist and load
@@ -180,7 +197,7 @@ where
     let changeset_read =
         WalletPersister::initialize(&mut store).expect("changeset should get loaded");
 
-    assert_eq!(changeset, changeset_read);
+    check_changesets(&changeset, &changeset_read);
 
     // create another changeset
     let local_chain_changeset = local_chain::ChangeSet {
@@ -231,6 +248,7 @@ where
         tx_graph: tx_graph_changeset,
         indexer: keychain_txout_changeset,
         locked_outpoints: locked_outpoints_changeset,
+        descriptors: [].into(),
     };
 
     // persist, load and check if same as merged
@@ -239,7 +257,7 @@ where
 
     changeset.merge(changeset_new);
 
-    assert_eq!(changeset, changeset_read_new);
+    check_changesets(&changeset, &changeset_read_new);
 }
 
 /// tests if multiple [`Wallet`]s can be persisted in a single file correctly
@@ -255,7 +273,7 @@ pub fn persist_multiple_wallet_changesets<Store, CreateStores>(
     create_dbs: CreateStores,
 ) where
     CreateStores: Fn(&Path) -> anyhow::Result<(Store, Store)>,
-    Store: WalletPersister,
+    Store: WalletPersister<KeychainKind>,
     Store::Error: Debug,
 {
     // create stores
@@ -279,7 +297,8 @@ pub fn persist_multiple_wallet_changesets<Store, CreateStores>(
         change_descriptor: Some(change_descriptor.clone()),
         network: Some(Network::Testnet),
         ..ChangeSet::default()
-    };
+    }
+    .from_v3();
 
     // persist first changeset
     WalletPersister::persist(&mut store_first, &changeset1).expect("should persist changeset");
@@ -298,7 +317,8 @@ pub fn persist_multiple_wallet_changesets<Store, CreateStores>(
         change_descriptor: Some(change_descriptor.clone()),
         network: Some(Network::Testnet),
         ..ChangeSet::default()
-    };
+    }
+    .from_v3();
 
     // persist second changeset
     WalletPersister::persist(&mut store_sec, &changeset2).expect("should persist changeset");
@@ -306,12 +326,15 @@ pub fn persist_multiple_wallet_changesets<Store, CreateStores>(
     // load first changeset
     let changeset_read =
         WalletPersister::initialize(&mut store_first).expect("should load persisted changeset1");
-    assert_eq!(changeset_read, changeset1);
+
+    check_changesets(&changeset_read, &changeset1);
 
     // load second changeset
     let changeset_read =
         WalletPersister::initialize(&mut store_sec).expect("should load persisted changeset2");
     assert_eq!(changeset_read, changeset2);
+
+    check_changesets(&changeset_read, &changeset2);
 }
 
 /// tests if [`Network`] is being persisted correctly
@@ -324,7 +347,7 @@ pub fn persist_multiple_wallet_changesets<Store, CreateStores>(
 pub fn persist_network<Store, CreateStore>(filename: &str, create_store: CreateStore)
 where
     CreateStore: Fn(&Path) -> anyhow::Result<Store>,
-    Store: WalletPersister,
+    Store: WalletPersister<KeychainKind>,
     Store::Error: Debug,
 {
     // create store
@@ -360,7 +383,7 @@ where
 pub fn persist_keychains<Store, CreateStore>(filename: &str, create_store: CreateStore)
 where
     CreateStore: Fn(&Path) -> anyhow::Result<Store>,
-    Store: WalletPersister,
+    Store: WalletPersister<KeychainKind>,
     Store::Error: Debug,
 {
     // create store
@@ -381,7 +404,8 @@ where
         descriptor: Some(descriptor.clone()),
         change_descriptor: Some(change_descriptor.clone()),
         ..ChangeSet::default()
-    };
+    }
+    .from_v3();
 
     WalletPersister::persist(&mut store, &changeset).expect("should persist descriptors");
 
@@ -389,8 +413,14 @@ where
     let changeset_read =
         WalletPersister::initialize(&mut store).expect("should read persisted changeset");
 
-    assert_eq!(changeset_read.descriptor.unwrap(), descriptor);
-    assert_eq!(changeset_read.change_descriptor.unwrap(), change_descriptor);
+    assert_eq!(
+        changeset_read.descriptors,
+        [
+            (KeychainKind::External, descriptor),
+            (KeychainKind::Internal, change_descriptor)
+        ]
+        .into()
+    );
 }
 
 /// tests if descriptor(in a single keychain wallet) is being persisted correctly
@@ -402,7 +432,7 @@ where
 pub fn persist_single_keychain<Store, CreateStore>(filename: &str, create_store: CreateStore)
 where
     CreateStore: Fn(&Path) -> anyhow::Result<Store>,
-    Store: WalletPersister,
+    Store: WalletPersister<KeychainKind>,
     Store::Error: Debug,
 {
     // create store
@@ -421,7 +451,8 @@ where
     let changeset = ChangeSet {
         descriptor: Some(descriptor.clone()),
         ..ChangeSet::default()
-    };
+    }
+    .from_v3();
 
     WalletPersister::persist(&mut store, &changeset).expect("should persist descriptors");
 
@@ -429,6 +460,8 @@ where
     let changeset_read =
         WalletPersister::initialize(&mut store).expect("should read persisted changeset");
 
-    assert_eq!(changeset_read.descriptor.unwrap(), descriptor);
-    assert_eq!(changeset_read.change_descriptor, None);
+    assert_eq!(
+        changeset_read.descriptors,
+        [(KeychainKind::External, descriptor)].into()
+    );
 }
