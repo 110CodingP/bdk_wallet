@@ -22,14 +22,64 @@ use alloc::{
 #[cfg(all(bdk_wallet_unstable, feature = "bdk-tx"))]
 use bdk_tx::bdk_coin_select;
 use bitcoin::{absolute, psbt, Amount, BlockHash, Network, OutPoint, Sequence, Txid};
-use core::fmt;
+use core::fmt::{self, Display};
+use miniscript::{Descriptor, DescriptorPublicKey};
+
+/// Errors encountered on wallet creation.
+#[derive(Debug, PartialEq)]
+pub enum InitError<K> {
+    /// The descriptor is invalid.
+    Descriptor(crate::descriptor::error::Error),
+    /// No keychains were provided.
+    NoKeychains,
+    /// The keychain provided is already assigned to a different descriptor.
+    KeychainAlreadyExists(Box<K>),
+    /// The descriptor provided is already assigned to a different keychain.
+    DescAlreadyExists(Box<Descriptor<DescriptorPublicKey>>),
+}
+
+impl<K> fmt::Display for InitError<K>
+where
+    K: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Descriptor(e) => e.fmt(f),
+            Self::NoKeychains => write!(f, "No keychains were provided."),
+            Self::KeychainAlreadyExists(keychain) => {
+                write!(f, "{keychain} is already assigned a different descriptor.")
+            }
+            Self::DescAlreadyExists(desc) => {
+                write!(f, "{desc} is already assigned to a different keychain.")
+            }
+        }
+    }
+}
+
+/// Keychain is missing
+#[derive(Debug)]
+pub struct MissingKeychain;
+
+impl fmt::Display for MissingKeychain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "The keychain does not exist!")
+    }
+}
+
+impl<K> core::error::Error for InitError<K> where K: fmt::Display + core::fmt::Debug {}
+
+impl<K> From<crate::descriptor::error::Error> for InitError<K> {
+    fn from(err: crate::descriptor::error::Error) -> Self {
+        InitError::Descriptor(err)
+    }
+}
 
 /// The error type when loading a [`Wallet`] from a [`ChangeSet`].
 ///
 /// [`Wallet`]: crate::wallet::Wallet
 /// [`ChangeSet`]: crate::wallet::ChangeSet
 #[derive(Debug, PartialEq)]
-pub enum LoadError {
+pub enum LoadError<K> {
     /// There was a problem with the passed-in descriptor(s).
     Descriptor(crate::descriptor::DescriptorError),
     /// Data loaded from persistence is missing network type.
@@ -37,12 +87,16 @@ pub enum LoadError {
     /// Data loaded from persistence is missing genesis hash.
     MissingGenesis,
     /// Data loaded from persistence is missing descriptor.
-    MissingDescriptor(KeychainKind),
+    MissingDescriptor(K),
     /// Data loaded is unexpected.
-    Mismatch(LoadMismatch),
+    Mismatch(LoadMismatch<K>),
+    /// The keychain provided is already assigned to a different descriptor.
+    KeychainAlreadyExists(Box<K>),
+    /// The descriptor provided is already assigned to a different keychain.
+    DescAlreadyExists(Box<Descriptor<DescriptorPublicKey>>),
 }
 
-impl fmt::Display for LoadError {
+impl<K: Display> fmt::Display for LoadError<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::Descriptor(e) => e.fmt(f),
@@ -52,17 +106,23 @@ impl fmt::Display for LoadError {
                 write!(f, "loaded data is missing descriptor for {k} keychain")
             }
             LoadError::Mismatch(e) => write!(f, "{e}"),
+            LoadError::KeychainAlreadyExists(keychain) => {
+                write!(f, "loaded data contained duplicate keychain: {keychain}")
+            }
+            LoadError::DescAlreadyExists(desc) => {
+                write!(f, "loaded data contained duplicate descriptor: {desc}")
+            }
         }
     }
 }
 
-impl core::error::Error for LoadError {}
+impl<K: fmt::Debug + Display> core::error::Error for LoadError<K> {}
 
 /// Represents a mismatch with what is loaded and what is expected from [`LoadParams`].
 ///
 /// [`LoadParams`]: crate::wallet::LoadParams
 #[derive(Debug, PartialEq)]
-pub enum LoadMismatch {
+pub enum LoadMismatch<K> {
     /// Network does not match.
     Network {
         /// The network that is loaded.
@@ -80,7 +140,7 @@ pub enum LoadMismatch {
     /// Descriptor's [`DescriptorId`](bdk_chain::DescriptorId) does not match.
     Descriptor {
         /// Keychain identifying the descriptor.
-        keychain: KeychainKind,
+        keychain: K,
         /// The loaded descriptor.
         loaded: Option<Box<ExtendedDescriptor>>,
         /// The expected descriptor.
@@ -88,7 +148,7 @@ pub enum LoadMismatch {
     },
 }
 
-impl fmt::Display for LoadMismatch {
+impl<K: Display> fmt::Display for LoadMismatch<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadMismatch::Network { loaded, expected } => {
@@ -121,14 +181,14 @@ impl fmt::Display for LoadMismatch {
     }
 }
 
-impl<E> From<LoadMismatch> for LoadWithPersistError<E> {
-    fn from(mismatch: LoadMismatch) -> Self {
+impl<K, E> From<LoadMismatch<K>> for LoadWithPersistError<K, E> {
+    fn from(mismatch: LoadMismatch<K>) -> Self {
         Self::InvalidChangeSet(LoadError::Mismatch(mismatch))
     }
 }
 
-impl From<LoadMismatch> for LoadError {
-    fn from(mismatch: LoadMismatch) -> Self {
+impl<K> From<LoadMismatch<K>> for LoadError<K> {
+    fn from(mismatch: LoadMismatch<K>) -> Self {
         Self::Mismatch(mismatch)
     }
 }

@@ -1,3 +1,4 @@
+use alloc::collections::btree_map::BTreeMap;
 use bdk_chain::{
     indexed_tx_graph, keychain_txout, local_chain, tx_graph, ConfirmationBlockTime, Merge,
 };
@@ -37,13 +38,13 @@ type IndexedTxGraphChangeSet =
 /// ## Members and required fields
 ///
 /// The change set has certain required fields without which a [`Wallet`] cannot function.
-/// These include the [`descriptor`] and the [`bitcoin::Network`] in use. These are required to be
+/// These include the [`descriptors`] and the [`bitcoin::Network`] in use. These are required to be
 /// non-empty *in the aggregate*, meaning the field must be present and non-null in the union of all
 /// persisted changes, but may be empty in any one change set, where "empty" is defined by the
 /// [`Merge`](Merge::is_empty) implementation of that change set. This requirement also applies to
 /// the [`local_chain`] field in that the aggregate change set must include a genesis block.
 ///
-/// For example, the [`descriptor`] and [`bitcoin::Network`] are present in the first change set
+/// For example, the [`descriptors`] and [`bitcoin::Network`] are present in the first change set
 /// after wallet creation, but are usually omitted in subsequent updates, as they are not permitted
 /// to change at any point thereafter.
 ///
@@ -52,11 +53,6 @@ type IndexedTxGraphChangeSet =
 /// state between sessions. These include:
 /// * [`tx_graph`](Self::tx_graph)
 /// * [`indexer`](Self::indexer)
-///
-/// The [`change_descriptor`] is special in that its presence is optional, however the value of the
-/// change descriptor should be defined at wallet creation time and respected for the life of the
-/// wallet, meaning that if a change descriptor is originally defined, it must also be present in
-/// the aggregate change set.
 ///
 /// ## Staging
 ///
@@ -121,23 +117,23 @@ type IndexedTxGraphChangeSet =
 /// please refer to the documentation for [`WalletPersister`] and [`PersistedWallet`] for more
 /// information.
 ///
-/// [`change_descriptor`]: Self::change_descriptor
-/// [`descriptor`]: Self::descriptor
+/// [`descriptors`]: Self::descriptors
 /// [`local_chain`]: Self::local_chain
 /// [merged]: bdk_chain::Merge
 /// [`network`]: Self::network
 /// [`PersistedWallet`]: crate::PersistedWallet
-/// [SQLite]: <https://docs.rs/rusqlite/0.31.0/rusqlite/>
+/// [SQLite]: bdk_chain::rusqlite
 /// [`Update`]: crate::Update
 /// [`WalletPersister`]: crate::WalletPersister
 /// [`Wallet::staged`]: crate::Wallet::staged
 /// [`Wallet`]: crate::Wallet
 /// [Semantic Versioning]: <https://doc.rust-lang.org/cargo/reference/semver.html>
-#[derive(Default, Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct ChangeSet {
-    /// Descriptor for recipient addresses.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(bound(deserialize = "K: Ord + serde::de::DeserializeOwned"))]
+pub struct ChangeSet<K> {
+    /// Descriptor for recipient addresses. (to be deprecated)
     pub descriptor: Option<Descriptor<DescriptorPublicKey>>,
-    /// Descriptor for change addresses.
+    /// Descriptor for change addresses. (to be deprecated)
     pub change_descriptor: Option<Descriptor<DescriptorPublicKey>>,
     /// Stores the network type of the transaction data.
     pub network: Option<bitcoin::Network>,
@@ -150,32 +146,49 @@ pub struct ChangeSet {
     /// Changes to locked outpoints.
     #[serde(default)]
     pub locked_outpoints: locked_outpoints::ChangeSet,
+    /// Descriptors corresponding to each keychain.
+    #[serde(default)]
+    pub descriptors: BTreeMap<K, Descriptor<DescriptorPublicKey>>,
 }
 
-impl Merge for ChangeSet {
+impl<K> Default for ChangeSet<K> {
+    fn default() -> Self {
+        Self {
+            descriptor: None,
+            change_descriptor: None,
+            network: None,
+            local_chain: local_chain::ChangeSet::default(),
+            tx_graph: tx_graph::ChangeSet::default(),
+            indexer: keychain_txout::ChangeSet::default(),
+            locked_outpoints: locked_outpoints::ChangeSet::default(),
+            descriptors: BTreeMap::default(),
+        }
+    }
+}
+
+impl<K: Ord> Merge for ChangeSet<K> {
     /// Merge another [`ChangeSet`] into itself.
     fn merge(&mut self, other: Self) {
-        if other.descriptor.is_some() {
-            debug_assert!(
-                self.descriptor.is_none() || self.descriptor == other.descriptor,
-                "descriptor must never change"
-            );
-            self.descriptor = other.descriptor;
-        }
-        if other.change_descriptor.is_some() {
-            debug_assert!(
-                self.change_descriptor.is_none()
-                    || self.change_descriptor == other.change_descriptor,
-                "change descriptor must never change"
-            );
-            self.change_descriptor = other.change_descriptor;
-        }
+        // ignore descriptor and change_descriptor fields.
+
         if other.network.is_some() {
             debug_assert!(
                 self.network.is_none() || self.network == other.network,
                 "network must never change"
             );
             self.network = other.network;
+        }
+
+        // Currently we do not allow addition of descriptors to the wallet.
+        if !other.descriptors.is_empty() {
+            if !self.descriptors.is_empty() {
+                debug_assert!(
+                    self.descriptors == other.descriptors,
+                    "Descriptors cannot be added, removed or reassigned to a different keychain."
+                )
+            } else {
+                self.descriptors = other.descriptors;
+            }
         }
 
         // merge locked outpoints
@@ -187,24 +200,71 @@ impl Merge for ChangeSet {
     }
 
     fn is_empty(&self) -> bool {
-        self.descriptor.is_none()
-            && self.change_descriptor.is_none()
-            && self.network.is_none()
+        // ignore descriptor and change_descriptor fields.
+        self.network.is_none()
             && self.local_chain.is_empty()
             && self.tx_graph.is_empty()
             && self.indexer.is_empty()
             && self.locked_outpoints.is_empty()
+            && self.descriptors.is_empty()
+    }
+}
+use crate::KeychainKind;
+
+// Contains methods to move back and forth between the v3 and v4 [`ChangeSets`].
+impl ChangeSet<KeychainKind> {
+    /// Populate `descriptors` using `descriptor` and `change_descriptor` if they exist.
+    ///
+    /// Note: Original `descriptors` is discarded. Other fields are copied as it is.
+    pub fn from_v3(self) -> Self {
+        let mut descriptors = BTreeMap::new();
+
+        if let Some(descriptor) = &self.descriptor {
+            descriptors.insert(KeychainKind::External, descriptor.clone());
+        }
+
+        if let Some(change_descriptor) = &self.change_descriptor {
+            descriptors.insert(KeychainKind::Internal, change_descriptor.clone());
+        }
+
+        Self {
+            descriptors,
+            ..self
+        }
+    }
+
+    /// Populate `descriptor` and `change_descriptor` values using `descriptors`.
+    ///
+    /// Note: Original `descriptor` and `change_descriptor` are discarded. Other fields are copied
+    /// as it is.
+    pub fn to_v3(self) -> Self {
+        let descriptor = self.descriptors.get(&KeychainKind::External).cloned();
+        let change_descriptor = self.descriptors.get(&KeychainKind::Internal).cloned();
+        Self {
+            descriptor,
+            change_descriptor,
+            ..self
+        }
     }
 }
 
 #[cfg(feature = "rusqlite")]
-impl ChangeSet {
+use chain::rusqlite::{types::FromSql, ToSql};
+
+#[cfg(feature = "rusqlite")]
+impl<K> ChangeSet<K>
+where
+    K: Ord + Clone + ToSql + FromSql,
+{
     /// Schema name for wallet.
     pub const WALLET_SCHEMA_NAME: &'static str = "bdk_wallet";
-    /// Name of table to store wallet descriptors and network.
+    /// Name of table to store the network and the to-be-deprecated fields(descriptor and
+    /// change_descriptor)
     pub const WALLET_TABLE_NAME: &'static str = "bdk_wallet";
     /// Name of table to store wallet locked outpoints.
     pub const WALLET_OUTPOINT_LOCK_TABLE_NAME: &'static str = "bdk_wallet_locked_outpoints";
+    /// Name of table to store wallet public descriptors.
+    pub const WALLET_DESC_TABLE_NAME: &'static str = "bdk_wallet_descriptors";
 
     /// Get v0 sqlite [ChangeSet] schema
     pub fn schema_v0() -> alloc::string::String {
@@ -231,12 +291,23 @@ impl ChangeSet {
         )
     }
 
+    /// Get v2 sqlite [`ChangeSet`] schema. Schema v2 adds a table for wallet descriptors.
+    pub fn schema_v2() -> alloc::string::String {
+        format!(
+            "CREATE TABLE {} ( \
+               keychain TEXT PRIMARY KEY NOT NULL, \
+               descriptor TEXT UNIQUE NOT NULL \
+            ) STRICT;",
+            Self::WALLET_DESC_TABLE_NAME,
+        )
+    }
+
     /// Initialize sqlite tables for wallet tables.
     pub fn init_sqlite_tables(db_tx: &chain::rusqlite::Transaction) -> chain::rusqlite::Result<()> {
         crate::rusqlite_impl::migrate_schema(
             db_tx,
             Self::WALLET_SCHEMA_NAME,
-            &[&Self::schema_v0(), &Self::schema_v1()],
+            &[&Self::schema_v0(), &Self::schema_v1(), &Self::schema_v2()],
         )?;
 
         bdk_chain::local_chain::ChangeSet::init_sqlite_tables(db_tx)?;
@@ -273,6 +344,24 @@ impl ChangeSet {
             changeset.descriptor = desc.map(Impl::into_inner);
             changeset.change_descriptor = change_desc.map(Impl::into_inner);
             changeset.network = network.map(Impl::into_inner);
+        }
+
+        // Select the descriptors
+        let mut descriptors_stmt = db_tx.prepare(&format!(
+            "SELECT keychain, descriptor FROM {}",
+            Self::WALLET_DESC_TABLE_NAME,
+        ))?;
+
+        let rows = descriptors_stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, K>("keychain")?,
+                row.get::<_, Impl<Descriptor<DescriptorPublicKey>>>("descriptor")?,
+            ))
+        })?;
+
+        for row in rows {
+            let (keychain, Impl(descriptor)) = row?;
+            changeset.descriptors.insert(keychain, descriptor);
         }
 
         // Select locked outpoints.
@@ -341,6 +430,19 @@ impl ChangeSet {
             })?;
         }
 
+        // Persist descriptors.
+        let mut descriptor_stmt = db_tx.prepare_cached(&format!(
+            "INSERT OR IGNORE INTO {}(keychain, descriptor) VALUES(:keychain, :desc)",
+            Self::WALLET_DESC_TABLE_NAME
+        ))?;
+
+        for (keychain, desc) in &self.descriptors {
+            descriptor_stmt.execute(named_params! {
+                ":keychain": keychain.clone(),
+                ":desc": Impl(desc.clone()),
+            })?;
+        }
+
         // Insert or delete locked outpoints.
         let mut insert_stmt = db_tx.prepare_cached(&format!(
             "INSERT OR IGNORE INTO {}(txid, vout) VALUES(:txid, :vout)",
@@ -372,7 +474,7 @@ impl ChangeSet {
     }
 }
 
-impl From<local_chain::ChangeSet> for ChangeSet {
+impl<K: Ord> From<local_chain::ChangeSet> for ChangeSet<K> {
     fn from(chain: local_chain::ChangeSet) -> Self {
         Self {
             local_chain: chain,
@@ -381,7 +483,7 @@ impl From<local_chain::ChangeSet> for ChangeSet {
     }
 }
 
-impl From<IndexedTxGraphChangeSet> for ChangeSet {
+impl<K: Ord> From<IndexedTxGraphChangeSet> for ChangeSet<K> {
     fn from(indexed_tx_graph: IndexedTxGraphChangeSet) -> Self {
         Self {
             tx_graph: indexed_tx_graph.tx_graph,
@@ -391,7 +493,7 @@ impl From<IndexedTxGraphChangeSet> for ChangeSet {
     }
 }
 
-impl From<tx_graph::ChangeSet<ConfirmationBlockTime>> for ChangeSet {
+impl<K: Ord> From<tx_graph::ChangeSet<ConfirmationBlockTime>> for ChangeSet<K> {
     fn from(tx_graph: tx_graph::ChangeSet<ConfirmationBlockTime>) -> Self {
         Self {
             tx_graph,
@@ -400,7 +502,7 @@ impl From<tx_graph::ChangeSet<ConfirmationBlockTime>> for ChangeSet {
     }
 }
 
-impl From<keychain_txout::ChangeSet> for ChangeSet {
+impl<K: Ord> From<keychain_txout::ChangeSet> for ChangeSet<K> {
     fn from(indexer: keychain_txout::ChangeSet) -> Self {
         Self {
             indexer,
@@ -409,7 +511,7 @@ impl From<keychain_txout::ChangeSet> for ChangeSet {
     }
 }
 
-impl From<locked_outpoints::ChangeSet> for ChangeSet {
+impl<K: Ord> From<locked_outpoints::ChangeSet> for ChangeSet<K> {
     fn from(locked_outpoints: locked_outpoints::ChangeSet) -> Self {
         Self {
             locked_outpoints,

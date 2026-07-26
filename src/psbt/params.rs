@@ -685,6 +685,7 @@ mod test {
         let outpoint_0 = OutPoint::new(txid0, 0);
         let change_descriptor = wallet
             .public_descriptor(Internal)
+            .expect("keychain must exist")
             .at_derivation_index(0)
             .unwrap();
 
