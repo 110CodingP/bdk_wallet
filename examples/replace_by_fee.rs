@@ -6,7 +6,7 @@ use bdk_chain::BlockId;
 use bdk_tx::ChangeScript;
 use bdk_wallet::psbt::PsbtParams;
 use bdk_wallet::test_utils::*;
-use bdk_wallet::{KeychainKind, Wallet};
+use bdk_wallet::{KeyRing, KeychainKind, Wallet};
 use bitcoin::{Amount, FeeRate, TxIn, TxOut};
 use miniscript::{DefiniteDescriptorKey, Descriptor};
 
@@ -17,11 +17,10 @@ const NETWORK: bitcoin::Network = bitcoin::Network::Regtest;
 
 fn main() -> anyhow::Result<()> {
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-
-    // Create wallet and "fund" it with a single UTXO.
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(NETWORK)
-        .create_wallet_no_persist()?;
+    let mut keyring = KeyRing::new(NETWORK);
+    keyring.add_descriptor(KeychainKind::External, desc)?;
+    keyring.add_descriptor(KeychainKind::Internal, change_desc)?;
+    let mut wallet = keyring.into_params()?.create_wallet_no_persist()?;
 
     fund_wallet(&mut wallet)?;
 
@@ -36,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     // Get a derived descriptor from the wallet to sweep funds to
     let derived_descriptor: Descriptor<DefiniteDescriptorKey> = wallet
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .at_derivation_index(1)?;
 
     println!(
@@ -156,7 +156,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn fund_wallet(wallet: &mut Wallet) -> anyhow::Result<()> {
+fn fund_wallet(wallet: &mut Wallet<KeychainKind>) -> anyhow::Result<()> {
     let anchor_block = BlockId {
         height: 1,
         hash: "3bcc1c447c6b3886f43e416b5c21cf5c139dc4829a71dc78609bc8f6235611c5".parse()?,
@@ -168,7 +168,10 @@ fn fund_wallet(wallet: &mut Wallet) -> anyhow::Result<()> {
 
     insert_checkpoint(wallet, anchor_block);
 
-    let addr = wallet.reveal_next_address(KeychainKind::External).address;
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist")
+        .address;
     let tx = bitcoin::Transaction {
         lock_time: bitcoin::absolute::LockTime::ZERO,
         version: bitcoin::transaction::Version::TWO,

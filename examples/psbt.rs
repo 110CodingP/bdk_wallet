@@ -7,7 +7,7 @@ use bdk_chain::BlockId;
 use bdk_chain::ConfirmationBlockTime;
 use bdk_wallet::psbt::{PsbtParams, SelectionStrategy::*};
 use bdk_wallet::test_utils::*;
-use bdk_wallet::{KeychainKind::External, Wallet};
+use bdk_wallet::{KeyRing, KeychainKind, Wallet};
 use bitcoin::{consensus, secp256k1::rand, Address, Amount, TxIn, TxOut};
 use rand::Rng;
 
@@ -22,9 +22,10 @@ fn main() -> anyhow::Result<()> {
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
 
     // Create wallet and fund it.
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(NETWORK)
-        .create_wallet_no_persist()?;
+    let mut keyring = KeyRing::new(NETWORK);
+    keyring.add_descriptor(KeychainKind::External, desc)?;
+    keyring.add_descriptor(KeychainKind::Internal, change_desc)?;
+    let mut wallet = keyring.into_params()?.create_wallet_no_persist()?;
 
     fund_wallet(&mut wallet)?;
 
@@ -80,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn fund_wallet(wallet: &mut Wallet) -> anyhow::Result<()> {
+fn fund_wallet(wallet: &mut Wallet<KeychainKind>) -> anyhow::Result<()> {
     let anchor = ConfirmationBlockTime {
         block_id: BlockId {
             height: 260071,
@@ -94,7 +95,10 @@ fn fund_wallet(wallet: &mut Wallet) -> anyhow::Result<()> {
 
     // Fund wallet with several random utxos
     for i in 0..21 {
-        let addr = wallet.reveal_next_address(External).address;
+        let addr = wallet
+            .reveal_next_address(KeychainKind::External)
+            .expect("keychain must exist")
+            .address;
         let value = 10_000 * (i + 1) + (100 * rng.gen_range(0..10));
         let tx = bitcoin::Transaction {
             lock_time: bitcoin::absolute::LockTime::ZERO,

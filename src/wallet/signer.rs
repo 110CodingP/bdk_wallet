@@ -11,9 +11,6 @@
 
 //! Generalized signers
 //!
-//! This module provides the ability to add customized signers to a [`Wallet`](super::Wallet)
-//! through the [`Wallet::add_signer`](super::Wallet::add_signer) function.
-//!
 //! ```
 //! # use alloc::sync::Arc;
 //! # use core::str::FromStr;
@@ -64,16 +61,32 @@
 //!         Ok(())
 //!     }
 //! }
+//! #     use bdk_wallet::descriptor::IntoWalletDescriptor;
+//! # pub fn get_signers(
+//! #     desc: impl IntoWalletDescriptor,
+//! #     wallet: &Wallet<KeychainKind>
+//! # ) -> bdk_wallet::signer::SignersContainer {
+//! #     use bdk_wallet::signer::SignersContainer;
+//! #
+//! #     let (descriptor, keymap) = desc.into_wallet_descriptor(wallet.secp_ctx(), wallet.network().into())
+//! #         .unwrap();
+//! #     SignersContainer::build(keymap, &descriptor, wallet.secp_ctx())
+//! # }
 //!
 //! let custom_signer = CustomSigner::connect();
+
 //!
-//! let descriptor = "wpkh(tpubD6NzVbkrYhZ4Xferm7Pz4VnjdcDPFyjVu5K4iZXQ4pVN8Cks4pHVowTBXBKRhX64pkRyJZJN5xAKj4UDNnLPb5p2sSKXhewoYx5GbTdUFWq/0/*)";
-//! let change_descriptor = "wpkh(tpubD6NzVbkrYhZ4Xferm7Pz4VnjdcDPFyjVu5K4iZXQ4pVN8Cks4pHVowTBXBKRhX64pkRyJZJN5xAKj4UDNnLPb5p2sSKXhewoYx5GbTdUFWq/1/*)";
-//! let mut wallet = Wallet::create(descriptor, change_descriptor)
-//!     .network(Network::Testnet)
-//!     .create_wallet_no_persist()?;
-//! wallet.add_signer(
-//!     KeychainKind::External,
+//! let descriptor =
+//! "wpkh(tpubD6NzVbkrYhZ4Xferm7Pz4VnjdcDPFyjVu5K4iZXQ4pVN8Cks4pHVowTBXBKRhX64pkRyJZJN5xAKj4UDNnLPb5p2sSKXhewoYx5GbTdUFWq/0/*)";
+//! let change_descriptor =
+//! "wpkh(tpubD6NzVbkrYhZ4Xferm7Pz4VnjdcDPFyjVu5K4iZXQ4pVN8Cks4pHVowTBXBKRhX64pkRyJZJN5xAKj4UDNnLPb5p2sSKXhewoYx5GbTdUFWq/1/*)";
+//! let mut keyring = KeyRing::new(Network::Testnet);
+//! keyring.add_descriptor(KeychainKind::External, descriptor)?;
+//! keyring.add_descriptor(KeychainKind::Internal, change_descriptor)?;
+//! let mut wallet = keyring.into_params()?.create_wallet_no_persist()?;
+//! let mut external_signers = get_signers(descriptor, &wallet);
+//! external_signers.add_external(
+//!     custom_signer.id(wallet.secp_ctx()),
 //!     SignerOrdering(200),
 //!     Arc::new(custom_signer)
 //! );

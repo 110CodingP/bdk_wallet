@@ -1,9 +1,10 @@
 use bdk_esplora::{esplora_client, EsploraAsyncExt};
 use bdk_wallet::{
     bitcoin::{Amount, FeeRate, Network},
+    descriptor::IntoWalletDescriptor,
     psbt::PsbtUtils,
     rusqlite::Connection,
-    KeychainKind, SignOptions, Wallet,
+    KeyRing, KeychainKind, SignOptions, Wallet,
 };
 use std::{collections::BTreeSet, io::Write};
 use tokio::time::{sleep, Duration};
@@ -24,17 +25,21 @@ async fn main() -> Result<(), anyhow::Error> {
     let wallet_opt = Wallet::load()
         .descriptor(KeychainKind::External, Some(EXTERNAL_DESC))
         .descriptor(KeychainKind::Internal, Some(INTERNAL_DESC))
-        .extract_keys()
         .check_network(NETWORK)
         .load_wallet(&mut db)?;
     let mut wallet = match wallet_opt {
         Some(wallet) => wallet,
-        None => Wallet::create(EXTERNAL_DESC, INTERNAL_DESC)
-            .network(NETWORK)
-            .create_wallet(&mut db)?,
+        None => {
+            let mut keyring = KeyRing::new(NETWORK);
+            keyring.add_descriptor(KeychainKind::External, EXTERNAL_DESC)?;
+            keyring.add_descriptor(KeychainKind::Internal, INTERNAL_DESC)?;
+            keyring.into_params()?.create_wallet(&mut db)?
+        }
     };
 
-    let address = wallet.next_unused_address(KeychainKind::External);
+    let address = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     wallet.persist(&mut db)?;
     println!("Next unused address: ({}) {address}", address.index);
 
@@ -83,7 +88,14 @@ async fn main() -> Result<(), anyhow::Error> {
     tx_builder.fee_rate(target_fee_rate);
 
     let mut psbt = tx_builder.finish()?;
-    let finalized = wallet.sign(&mut psbt, SignOptions::default())?;
+    let finalized = wallet.sign_with_signers(
+        &mut psbt,
+        &[
+            &get_signers(EXTERNAL_DESC, &wallet),
+            &get_signers(INTERNAL_DESC, &wallet),
+        ],
+        SignOptions::default(),
+    )?;
     assert!(finalized);
     let original_fee = psbt.fee_amount().unwrap();
     let tx_feerate = psbt.fee_rate().unwrap();
@@ -117,7 +129,14 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut builder = wallet.build_fee_bump(txid).expect("failed to bump tx");
     builder.fee_rate(feerate);
     let mut bumped_psbt = builder.finish().unwrap();
-    let finalize_btx = wallet.sign(&mut bumped_psbt, SignOptions::default())?;
+    let finalize_btx = wallet.sign_with_signers(
+        &mut bumped_psbt,
+        &[
+            &get_signers(EXTERNAL_DESC, &wallet),
+            &get_signers(INTERNAL_DESC, &wallet),
+        ],
+        SignOptions::default(),
+    )?;
     assert!(finalize_btx);
     let new_fee = bumped_psbt.fee_amount().unwrap();
     let bumped_tx = bumped_psbt.extract_tx()?;
@@ -184,4 +203,16 @@ async fn main() -> Result<(), anyhow::Error> {
     );
 
     Ok(())
+}
+
+pub fn get_signers(
+    desc: impl IntoWalletDescriptor,
+    wallet: &Wallet<KeychainKind>,
+) -> bdk_wallet::signer::SignersContainer {
+    use bdk_wallet::signer::SignersContainer;
+
+    let (descriptor, keymap) = desc
+        .into_wallet_descriptor(wallet.secp_ctx(), wallet.network().into())
+        .unwrap();
+    SignersContainer::build(keymap, &descriptor, wallet.secp_ctx())
 }

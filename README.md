@@ -79,7 +79,7 @@ To persist `Wallet` state use a data storage crate that reads and writes [`Chang
 
 ```rust,no_run
 use bdk_wallet::rusqlite;
-use bdk_wallet::{KeychainKind, Wallet};
+use bdk_wallet::{KeyRing, KeychainKind, Wallet};
 
 // Open or create a new SQLite database for wallet data.
 let db_path = "my_wallet.sqlite";
@@ -92,18 +92,20 @@ let change_descriptor = "wpkh(tprv8ZgxMBicQKsPdcAqYBpzAFwU5yxBUo88ggoBqu1qPcHUfS
 let mut wallet = match Wallet::load()
     .descriptor(KeychainKind::External, Some(descriptor))
     .descriptor(KeychainKind::Internal, Some(change_descriptor))
-    .extract_keys()
     .check_network(network)
     .load_wallet(&mut conn)?
 {
     Some(wallet) => wallet,
-    None => Wallet::create(descriptor, change_descriptor)
-        .network(network)
-        .create_wallet(&mut conn)?,
+    None => {
+        let mut keyring = KeyRing::new(network);
+        keyring.add_descriptor(KeychainKind::External, descriptor)?;
+        keyring.add_descriptor(KeychainKind::Internal, change_descriptor)?;
+        keyring.into_params()?.create_wallet(&mut conn)?
+    }
 };
 
 // Get a new address to receive bitcoin!
-let address_info = wallet.reveal_next_address(KeychainKind::External);
+let address_info = wallet.reveal_next_address(KeychainKind::External).expect("keychain must exist");
 
 // Persist new wallet state to database.
 wallet.persist(&mut conn)?;

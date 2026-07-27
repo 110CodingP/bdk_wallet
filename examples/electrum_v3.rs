@@ -1,3 +1,4 @@
+//  Just for testing purposes
 use bdk_electrum::electrum_client;
 use bdk_electrum::BdkElectrumClient;
 use bdk_wallet::bitcoin::Amount;
@@ -9,7 +10,7 @@ use bdk_wallet::psbt::PsbtUtils;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::KeyRing;
 use bdk_wallet::Wallet;
-use bdk_wallet::{KeychainKind, SignOptions};
+use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions};
 use std::io::Write;
 use std::thread::sleep;
 use std::time::Duration;
@@ -18,7 +19,7 @@ const SEND_AMOUNT: Amount = Amount::from_sat(5000);
 const STOP_GAP: usize = 50;
 const BATCH_SIZE: usize = 5;
 
-const DB_PATH: &str = "bdk-example-electrum.sqlite";
+const DB_PATH: &str = "v3_db";
 const NETWORK: Network = Network::Testnet4;
 const EXTERNAL_DESC: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
 const INTERNAL_DESC: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/1/*)";
@@ -26,11 +27,11 @@ const ELECTRUM_URL: &str = "ssl://mempool.space:40002";
 
 fn main() -> Result<(), anyhow::Error> {
     let mut db = Connection::open(DB_PATH)?;
-    let wallet_opt = Wallet::load()
+    let load_params = Wallet::load()
         .descriptor(KeychainKind::External, Some(EXTERNAL_DESC))
         .descriptor(KeychainKind::Internal, Some(INTERNAL_DESC))
-        .check_network(NETWORK)
-        .load_wallet(&mut db)?;
+        .check_network(NETWORK);
+    let wallet_opt = PersistedWallet::load_from_v3(&mut db, load_params)?;
     let mut wallet = match wallet_opt {
         Some(wallet) => wallet,
         None => {
@@ -44,7 +45,7 @@ fn main() -> Result<(), anyhow::Error> {
     let address = wallet
         .next_unused_address(KeychainKind::External)
         .expect("keychain must exist");
-    wallet.persist(&mut db)?;
+    wallet.persist_to_v3(&mut db)?;
     println!("Generated Address: {address}");
 
     let balance = wallet.balance();
@@ -74,7 +75,7 @@ fn main() -> Result<(), anyhow::Error> {
     println!();
 
     wallet.apply_update(update)?;
-    wallet.persist(&mut db)?;
+    wallet.persist_to_v3(&mut db)?;
 
     let balance = wallet.balance();
     println!("Wallet balance after full sync: {}", balance.total());
@@ -130,7 +131,7 @@ fn main() -> Result<(), anyhow::Error> {
     let sync_update = client.sync(sync_request, BATCH_SIZE, false)?;
     println!();
     wallet.apply_update(sync_update)?;
-    wallet.persist(&mut db)?;
+    wallet.persist_to_v3(&mut db)?;
 
     // bump fee rate for tx by at least 1 sat per vbyte
     let feerate = FeeRate::from_sat_per_vb(tx_feerate.to_sat_per_vb_ceil() + 1).unwrap();
@@ -184,7 +185,7 @@ fn main() -> Result<(), anyhow::Error> {
     if !evicted_txs.is_empty() {
         println!("Applied {} evicted transactions", evicted_txs.len());
     }
-    wallet.persist(&mut db)?;
+    wallet.persist_to_v3(&mut db)?;
 
     let balance_after_sync = wallet.balance();
     println!("Wallet balance after sync: {}", balance_after_sync.total());
