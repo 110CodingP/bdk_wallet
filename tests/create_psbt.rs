@@ -5,9 +5,8 @@ use bdk_chain::{BlockId, ConfirmationBlockTime};
 use bdk_tx::{bdk_coin_select, ChangeScript};
 use bdk_wallet::bitcoin;
 use bdk_wallet::test_utils::*;
-use bdk_wallet::{
-    error::CreatePsbtError, psbt, KeychainKind, PsbtParams, SelectionStrategy, Wallet,
-};
+use bdk_wallet::KeyRing;
+use bdk_wallet::{error::CreatePsbtError, psbt, KeychainKind, PsbtParams, SelectionStrategy};
 use bitcoin::{
     absolute, hashes::Hash, Amount, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction,
     TxIn, TxOut,
@@ -18,11 +17,24 @@ use miniscript::plan::Assets;
 #[test]
 fn test_create_psbt() {
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
-    let expected_xpub = match wallet.public_descriptor(KeychainKind::External) {
+        .expect("wallet");
+
+    let expected_xpub = match wallet
+        .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
+    {
         miniscript::Descriptor::Tr(tr) => match tr.internal_key() {
             miniscript::DescriptorPublicKey::XPub(desc) => desc.xkey,
             _ => unreachable!(),
@@ -43,10 +55,13 @@ fn test_create_psbt() {
 
     let change_descriptor = wallet
         .public_descriptor(KeychainKind::Internal)
+        .expect("keychain must exist")
         .at_derivation_index(0)
         .unwrap();
 
-    let addr = wallet.reveal_next_address(KeychainKind::External);
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut params = PsbtParams::default();
     let feerate = FeeRate::from_sat_per_vb(4).unwrap();
     let selection_strategy = psbt::SelectionStrategy::LowestFee {
@@ -101,12 +116,23 @@ fn test_create_psbt() {
 #[test]
 fn test_create_psbt_insufficient_funds_error() {
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
-        .create_wallet_no_persist()
-        .unwrap();
 
-    let addr = wallet.reveal_next_address(KeychainKind::External);
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
+        .create_wallet_no_persist()
+        .expect("wallet");
+
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist");
 
     let mut params = PsbtParams::default();
     params.add_recipients([(addr.script_pubkey(), Amount::from_sat(10_000))]);
@@ -123,12 +149,26 @@ fn test_create_psbt_insufficient_funds_error() {
 #[test]
 fn test_create_psbt_maturity_height() {
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
-    let receive_address = wallet.reveal_next_address(KeychainKind::External);
-    let send_to_address = wallet.reveal_next_address(KeychainKind::External).address;
+        .expect("wallet");
+
+    let receive_address = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist");
+    let send_to_address = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist")
+        .address;
 
     let block_1 = BlockId {
         height: 1,
@@ -186,10 +226,15 @@ fn test_create_psbt_cltv() {
     use absolute::LockTime;
 
     let desc = get_test_single_sig_cltv();
-    let mut wallet = Wallet::create_single(desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     // Receive coins
     let anchor = ConfirmationBlockTime {
@@ -202,14 +247,25 @@ fn test_create_psbt_cltv() {
     insert_checkpoint(&mut wallet, anchor.block_id);
     let op = receive_output(&mut wallet, Amount::ONE_BTC, ReceiveTo::Block(anchor));
 
-    let addr = wallet.reveal_next_address(KeychainKind::External);
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist");
+    let next_index = wallet
+        .next_derivation_index(KeychainKind::External)
+        .expect("keychain must exist");
+    let change_descriptor = wallet
+        .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
+        .at_derivation_index(next_index)
+        .unwrap();
 
     // No assets fail
     {
         let mut params = PsbtParams::default();
         params
             .add_utxos(&[op])
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let res = wallet.create_psbt(params);
         assert!(
             matches!(res, Err(CreatePsbtError::Plan(err)) if err == op),
@@ -223,7 +279,8 @@ fn test_create_psbt_cltv() {
         params
             .add_utxos(&[op])
             .add_assets(Assets::new().after(LockTime::from_consensus(100_000)))
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.lock_time.to_consensus_u32(), 100_000);
     }
@@ -239,7 +296,8 @@ fn test_create_psbt_cltv() {
         let mut params = PsbtParams::default();
         params
             .add_utxos(&[op])
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.lock_time.to_consensus_u32(), 100_000);
     }
@@ -250,7 +308,8 @@ fn test_create_psbt_cltv() {
         params
             .add_utxos(&[op])
             .locktime(LockTime::from_consensus(200_000))
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor));
 
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.lock_time.to_consensus_u32(), 200_000);
@@ -263,22 +322,38 @@ fn test_create_psbt_cltv_timestamp() {
 
     let lock_time = LockTime::from_consensus(1734230218);
     let desc = get_test_single_sig_cltv_timestamp();
-    let mut wallet = Wallet::create_single(desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     // Receive coins
     let op = receive_output(&mut wallet, Amount::ONE_BTC, ReceiveTo::Mempool(1));
 
-    let addr = wallet.reveal_next_address(KeychainKind::External);
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist");
+    let next_index = wallet
+        .next_derivation_index(KeychainKind::External)
+        .expect("keychain must exist");
+    let change_descriptor = wallet
+        .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
+        .at_derivation_index(next_index)
+        .unwrap();
 
     // No assets fail
     {
         let mut params = PsbtParams::default();
         params
             .add_utxos(&[op])
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let res = wallet.create_psbt(params);
         assert!(
             matches!(res, Err(CreatePsbtError::Plan(err)) if err == op),
@@ -292,7 +367,8 @@ fn test_create_psbt_cltv_timestamp() {
         params
             .add_utxos(&[op])
             .add_assets(Assets::new().after(lock_time))
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.lock_time, lock_time);
     }
@@ -306,7 +382,8 @@ fn test_create_psbt_cltv_timestamp() {
             .add_utxos(&[op])
             .add_assets(Assets::new().after(lock_time))
             .locktime(LockTime::from_consensus(new_lock_time))
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor));
 
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.lock_time.to_consensus_u32(), new_lock_time);
@@ -319,10 +396,16 @@ fn test_create_psbt_csv() {
     use bitcoin::Sequence;
 
     let desc = get_test_single_sig_csv();
-    let mut wallet = Wallet::create_single(desc)
-        .network(Network::Regtest)
+
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     // Receive coins
     let anchor = ConfirmationBlockTime {
@@ -335,14 +418,25 @@ fn test_create_psbt_csv() {
     insert_checkpoint(&mut wallet, anchor.block_id);
     let op = receive_output(&mut wallet, Amount::ONE_BTC, ReceiveTo::Block(anchor));
 
-    let addr = wallet.reveal_next_address(KeychainKind::External);
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist");
+    let next_index = wallet
+        .next_derivation_index(KeychainKind::External)
+        .expect("keychain must exist");
+    let change_descriptor = wallet
+        .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
+        .at_derivation_index(next_index)
+        .unwrap();
 
     // No assets fail
     {
         let mut params = PsbtParams::default();
         params
             .add_utxos(&[op])
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let res = wallet.create_psbt(params);
         assert!(
             matches!(res, Err(CreatePsbtError::Plan(err)) if err == op),
@@ -357,7 +451,8 @@ fn test_create_psbt_csv() {
         params
             .add_utxos(&[op])
             .add_assets(Assets::new().older(rel_locktime))
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor.clone()));
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.input[0].sequence, Sequence(6));
     }
@@ -375,7 +470,8 @@ fn test_create_psbt_csv() {
         let mut params = PsbtParams::default();
         params
             .add_utxos(&[op])
-            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())]);
+            .add_recipients([(addr.script_pubkey(), Amount::from_btc(0.42).unwrap())])
+            .change_script(ChangeScript::from_descriptor(change_descriptor));
         let (psbt, _) = wallet.create_psbt(params).unwrap();
         assert_eq!(psbt.unsigned_tx.input[0].sequence, Sequence(6));
     }
@@ -386,7 +482,9 @@ fn test_create_psbt_csv() {
 #[test]
 fn test_create_psbt_fallback_sequence_applied_to_coin_selected_input() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut params = PsbtParams::default();
     params
         .add_recipients([(addr.script_pubkey(), Amount::from_sat(25_000))])
@@ -403,10 +501,17 @@ fn test_create_psbt_fallback_sequence_applied_to_coin_selected_input() {
 #[test]
 fn test_create_psbt_fallback_sequence_skipped_for_csv_input() {
     use bitcoin::relative;
-    let mut wallet = Wallet::create_single(get_test_single_sig_csv())
-        .network(Network::Regtest)
+
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, get_test_single_sig_csv())
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
+
     let anchor = ConfirmationBlockTime {
         block_id: BlockId {
             height: 10_000,
@@ -421,13 +526,24 @@ fn test_create_psbt_fallback_sequence_skipped_for_csv_input() {
         ReceiveTo::Block(anchor),
     );
 
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
+    let next_index = wallet
+        .next_derivation_index(KeychainKind::External)
+        .expect("keychain must exist");
+    let change_descriptor = wallet
+        .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
+        .at_derivation_index(next_index)
+        .unwrap();
     let rel_locktime = relative::LockTime::from_consensus(6).unwrap();
     let mut params = PsbtParams::default();
     params
         .add_utxos(&[op])
         .add_assets(Assets::new().older(rel_locktime))
         .add_recipients([(addr.script_pubkey(), Amount::from_sat(25_000))])
+        .change_script(ChangeScript::from_descriptor(change_descriptor))
         .fallback_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME);
     let psbt = wallet.create_psbt(params).unwrap().0;
     // CSV descriptor requires older(6); fallback must not clobber the CSV-derived sequence.
@@ -439,7 +555,9 @@ fn test_create_psbt_fallback_sequence_skipped_for_csv_input() {
 fn test_create_psbt_sequence_override_manually_selected_input() {
     let (mut wallet, txid) = get_funded_wallet_wpkh();
     let utxo = OutPoint::new(txid, 0);
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut params = PsbtParams::default();
     params
         .add_recipients([(addr.script_pubkey(), Amount::from_sat(25_000))])
@@ -455,7 +573,9 @@ fn test_create_psbt_sequence_override_manually_selected_input() {
 fn test_create_psbt_sequence_override_takes_precedence_over_fallback() {
     let (mut wallet, txid) = get_funded_wallet_wpkh();
     let utxo = OutPoint::new(txid, 0);
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut params = PsbtParams::default();
     params
         .add_recipients([(addr.script_pubkey(), Amount::from_sat(25_000))])
@@ -471,10 +591,17 @@ fn test_create_psbt_sequence_override_takes_precedence_over_fallback() {
 #[test]
 fn test_create_psbt_sequence_override_csv_conflict_returns_error() {
     use bitcoin::relative;
-    let mut wallet = Wallet::create_single(get_test_single_sig_csv())
-        .network(Network::Regtest)
+
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, get_test_single_sig_csv())
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
+
     let anchor = ConfirmationBlockTime {
         block_id: BlockId {
             height: 10_000,
@@ -489,13 +616,24 @@ fn test_create_psbt_sequence_override_csv_conflict_returns_error() {
         ReceiveTo::Block(anchor),
     );
 
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
+    let next_index = wallet
+        .next_derivation_index(KeychainKind::External)
+        .expect("keychain must exist");
+    let change_descriptor = wallet
+        .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
+        .at_derivation_index(next_index)
+        .unwrap();
     let rel_locktime = relative::LockTime::from_consensus(6).unwrap();
     let mut params = PsbtParams::default();
     params
         .add_utxos(&[op])
         .add_assets(Assets::new().older(rel_locktime))
         .add_recipients([(addr.script_pubkey(), Amount::from_sat(25_000))])
+        .change_script(ChangeScript::from_descriptor(change_descriptor))
         .manually_selected_only()
         .sequence_override(op, Sequence(3)); // CSV requires >= 6
     let result = wallet.create_psbt(params);
@@ -516,10 +654,18 @@ fn test_replace_by_fee_replaces_descendant_fees() {
     use KeychainKind::*;
 
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     let block_id = BlockId {
         height: 100,
@@ -528,9 +674,18 @@ fn test_replace_by_fee_replaces_descendant_fees() {
 
     // addr0 receives the confirmed funding; addr1 and addr2 are wallet change
     // addresses that tx A pays into so that B and C can spend them.
-    let addr0 = wallet.reveal_next_address(External).address;
-    let addr1 = wallet.reveal_next_address(Internal).address;
-    let addr2 = wallet.reveal_next_address(Internal).address;
+    let addr0 = wallet
+        .reveal_next_address(External)
+        .expect("keychain must exist")
+        .address;
+    let addr1 = wallet
+        .reveal_next_address(Internal)
+        .expect("keychain must exist")
+        .address;
+    let addr2 = wallet
+        .reveal_next_address(Internal)
+        .expect("keychain must exist")
+        .address;
 
     // External (non-wallet) output script used as a sink for recipients.
     let external =
@@ -640,16 +795,27 @@ fn test_replace_by_fee_confirmed_tx_error() {
     use KeychainKind::*;
 
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     let block = BlockId {
         height: 100,
         hash: Hash::hash(b"100"),
     };
-    let addr = wallet.reveal_next_address(External).address;
+    let addr = wallet
+        .reveal_next_address(External)
+        .expect("keychain must exist")
+        .address;
 
     // Fund the wallet with a confirmed output.
     let funding_tx = Transaction {
@@ -703,12 +869,23 @@ fn test_replace_by_fee_no_inputs_from_original() {
     use KeychainKind::*;
 
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
-    let addr = wallet.reveal_next_address(External).address;
+    let addr = wallet
+        .reveal_next_address(External)
+        .expect("keychain must exist")
+        .address;
 
     // Fund the wallet with an unconfirmed output.
     let funding_tx = Transaction {
@@ -757,10 +934,18 @@ fn test_replace_by_fee_no_original_transactions() {
     use bdk_wallet::error::ReplaceByFeeError;
 
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     // replace_txs with an empty iterator produces PsbtParams<ReplaceTx> with an empty replace set.
     let params = PsbtParams::default().replace_txs(core::iter::empty::<Transaction>());
@@ -780,12 +965,23 @@ fn test_replace_by_fee_conflicting_input_descendant() {
     use bitcoin::{psbt as btc_psbt, Sequence};
 
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
-    let addr = wallet.reveal_next_address(KeychainKind::External).address;
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist")
+        .address;
 
     // Fund the wallet so there is a spendable UTXO.
     let funding_tx = Transaction {
@@ -867,10 +1063,18 @@ fn test_replace_by_fee_conflicting_input_descendant() {
 #[test]
 fn test_create_psbt_utxo_filter() {
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     let anchor = ConfirmationBlockTime {
         block_id: BlockId {
@@ -901,6 +1105,7 @@ fn test_create_psbt_utxo_filter() {
     let change_script = ChangeScript::from_descriptor(
         wallet
             .public_descriptor(KeychainKind::Internal)
+            .expect("keychain must exist")
             .at_derivation_index(0)
             .unwrap(),
     );
@@ -948,6 +1153,7 @@ fn test_create_psbt_no_recipients_error() {
     let mut params = PsbtParams::default();
     let change_descriptor = wallet
         .public_descriptor(KeychainKind::Internal)
+        .expect("keychain must exist")
         .at_derivation_index(0)
         .unwrap();
     params
@@ -964,10 +1170,18 @@ fn test_create_psbt_no_recipients_error() {
 #[test]
 fn test_create_psbt_drain_wallet_change_below_dust_error() {
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     let anchor = ConfirmationBlockTime {
         block_id: BlockId {
@@ -985,6 +1199,7 @@ fn test_create_psbt_drain_wallet_change_below_dust_error() {
 
     let change_descriptor = wallet
         .public_descriptor(KeychainKind::Internal)
+        .expect("keychain must exist")
         .at_derivation_index(0)
         .unwrap();
     let mut params = PsbtParams::default();
@@ -1008,10 +1223,18 @@ fn test_replace_by_fee_drain_wallet_change_below_dust_error() {
     use bitcoin::transaction;
 
     let (desc, change_desc) = get_test_tr_single_sig_xprv_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
     let anchor = ConfirmationBlockTime {
         block_id: BlockId {
@@ -1039,6 +1262,8 @@ fn test_replace_by_fee_drain_wallet_change_below_dust_error() {
             value: Amount::from_sat(300),
             script_pubkey: wallet
                 .peek_address(KeychainKind::External, 1)
+                .expect("keychain must exist")
+                .expect("index in bounds")
                 .script_pubkey(),
         }],
     };
@@ -1048,6 +1273,7 @@ fn test_replace_by_fee_drain_wallet_change_below_dust_error() {
     // The only possible output (change) falls below dust.
     let change_descriptor = wallet
         .public_descriptor(KeychainKind::Internal)
+        .expect("keychain must exist")
         .at_derivation_index(0)
         .unwrap();
     let mut params = PsbtParams::default().replace_txs([original_tx]);
@@ -1067,12 +1293,23 @@ fn test_replace_by_fee_drain_wallet_change_below_dust_error() {
 #[test]
 fn test_replace_tx_with_planned_input() {
     let (desc, change_desc) = get_test_wpkh_and_change_desc();
-    let mut wallet = Wallet::create(desc, change_desc)
-        .network(Network::Regtest)
+    let mut keyring = KeyRing::new(Network::Regtest);
+    keyring
+        .add_descriptor(KeychainKind::External, desc)
+        .expect("should add keychain");
+    keyring
+        .add_descriptor(KeychainKind::Internal, change_desc)
+        .expect("should add keychain");
+    let mut wallet = keyring
+        .into_params()
+        .expect("should be a valid keyring")
         .create_wallet_no_persist()
-        .unwrap();
+        .expect("wallet");
 
-    let addr = wallet.reveal_next_address(KeychainKind::External).address;
+    let addr = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist")
+        .address;
 
     // Fund the wallet with an unconfirmed output.
     let funding_tx = Transaction {
@@ -1179,7 +1416,10 @@ fn test_add_planned_psbt_input() -> anyhow::Result<()> {
         /* absolute_timelock: */ None,
     )?;
 
-    let send_to = wallet.reveal_next_address(KeychainKind::External).address;
+    let send_to = wallet
+        .reveal_next_address(KeychainKind::External)
+        .expect("keychain must exist")
+        .address;
 
     // Build tx: 2-in / 2-out
     let mut params = PsbtParams::default();

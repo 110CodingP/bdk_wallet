@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use bdk_wallet::psbt::PsbtUtils;
-use bdk_wallet::signer::SignOptions;
 use bdk_wallet::test_utils::*;
 use bdk_wallet::tx_builder::AddForeignUtxoError;
 use bdk_wallet::KeychainKind;
@@ -9,11 +8,16 @@ use bitcoin::{psbt, Address, Amount};
 
 mod common;
 
+use common::get_signers;
+
 #[test]
 fn test_add_foreign_utxo() {
+    use bdk_wallet::signer::SignOptions;
+
     let (mut wallet1, _) = get_funded_wallet_wpkh();
-    let (wallet2, _) =
-        get_funded_wallet_single("wpkh(cVbZ8ovhye9AoAHFsqobCf7LxbXDAECy9Kb8TZdfsDYMZGBUyCnm)");
+    let (desc1, change_desc1) = get_test_wpkh_and_change_desc();
+    let desc2 = "wpkh(cVbZ8ovhye9AoAHFsqobCf7LxbXDAECy9Kb8TZdfsDYMZGBUyCnm)";
+    let (wallet2, _) = get_funded_wallet_single(desc2);
 
     let addr = Address::from_str("2N1Ffz3WaNzbeLFBb51xyFMHYSEUXcbiSoX")
         .unwrap()
@@ -21,6 +25,7 @@ fn test_add_foreign_utxo() {
     let utxo = wallet2.list_unspent().next().expect("must take!");
     let foreign_utxo_satisfaction = wallet2
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 
@@ -56,8 +61,12 @@ fn test_add_foreign_utxo() {
     );
 
     let finished = wallet1
-        .sign(
+        .sign_with_signers(
             &mut psbt,
+            &[
+                &get_signers(desc1, &wallet1),
+                &get_signers(change_desc1, &wallet1),
+            ],
             SignOptions {
                 trust_witness_utxo: true,
                 ..Default::default()
@@ -71,8 +80,9 @@ fn test_add_foreign_utxo() {
     );
 
     let finished = wallet2
-        .sign(
+        .sign_with_signers(
             &mut psbt,
+            &[&get_signers(desc2, &wallet2)],
             SignOptions {
                 trust_witness_utxo: true,
                 ..Default::default()
@@ -95,6 +105,7 @@ fn test_calculate_fee_with_missing_foreign_utxo() {
     let utxo = wallet2.list_unspent().next().expect("must take!");
     let foreign_utxo_satisfaction = wallet2
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 
@@ -123,6 +134,7 @@ fn test_add_foreign_utxo_invalid_psbt_input() {
     let outpoint = wallet.list_unspent().next().expect("must exist").outpoint;
     let foreign_utxo_satisfaction = wallet
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 
@@ -144,6 +156,7 @@ fn test_add_foreign_utxo_where_outpoint_doesnt_match_psbt_input() {
 
     let satisfaction_weight = wallet2
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 
@@ -188,6 +201,7 @@ fn test_add_foreign_utxo_only_witness_utxo() {
 
     let satisfaction_weight = wallet2
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 
@@ -257,6 +271,7 @@ fn test_taproot_foreign_utxo() {
     let psbt_input = wallet2.get_psbt_input(utxo.clone(), None, false).unwrap();
     let foreign_utxo_satisfaction = wallet2
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 
@@ -302,6 +317,7 @@ fn test_add_foreign_utxo_rejects_wrong_non_witness_utxo_even_with_witness_utxo()
 
     let satisfaction_weight = wallet2
         .public_descriptor(KeychainKind::External)
+        .expect("keychain must exist")
         .max_weight_to_satisfy()
         .unwrap();
 

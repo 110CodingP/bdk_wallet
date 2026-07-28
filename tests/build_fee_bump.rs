@@ -19,7 +19,9 @@ use common::*;
 #[should_panic(expected = "IrreplaceableTransaction")]
 fn test_bump_fee_irreplaceable_tx() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr.script_pubkey(), Amount::from_sat(25_000));
     builder.set_exact_sequence(Sequence(0xFFFFFFFE));
@@ -35,7 +37,9 @@ fn test_bump_fee_irreplaceable_tx() {
 #[should_panic(expected = "TransactionConfirmed")]
 fn test_bump_fee_confirmed_tx() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr.script_pubkey(), Amount::from_sat(25_000));
     let psbt = builder.finish().unwrap();
@@ -57,7 +61,9 @@ fn test_bump_fee_confirmed_tx() {
 #[test]
 fn test_bump_fee_low_fee_rate() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr.script_pubkey(), Amount::from_sat(25_000));
 
@@ -87,7 +93,9 @@ fn test_bump_fee_low_fee_rate() {
 #[should_panic(expected = "FeeTooLow")]
 fn test_bump_fee_low_abs() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr.script_pubkey(), Amount::from_sat(25_000));
     let psbt = builder.finish().unwrap();
@@ -105,7 +113,9 @@ fn test_bump_fee_low_abs() {
 #[should_panic(expected = "FeeTooLow")]
 fn test_bump_fee_zero_abs() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr.script_pubkey(), Amount::from_sat(25_000));
     let psbt = builder.finish().unwrap();
@@ -291,6 +301,7 @@ fn test_bump_fee_drain_wallet() {
         output: vec![TxOut {
             script_pubkey: wallet
                 .next_unused_address(KeychainKind::External)
+                .expect("keychain must exist")
                 .script_pubkey(),
             value: Amount::from_sat(25_000),
         }],
@@ -353,6 +364,7 @@ fn test_bump_fee_remove_output_manually_selected_only() {
         output: vec![TxOut {
             script_pubkey: wallet
                 .next_unused_address(KeychainKind::External)
+                .expect("keychain must exist")
                 .script_pubkey(),
             value: Amount::from_sat(25_000),
         }],
@@ -405,6 +417,7 @@ fn test_bump_fee_add_input() {
         output: vec![TxOut {
             script_pubkey: wallet
                 .next_unused_address(KeychainKind::External)
+                .expect("keychain must exist")
                 .script_pubkey(),
             value: Amount::from_sat(25_000),
         }],
@@ -760,7 +773,9 @@ fn test_bump_fee_unconfirmed_input() {
 #[should_panic(expected = "FeeTooLow")]
 fn test_legacy_bump_fee_zero_abs() {
     let (mut wallet, _) = get_funded_wallet_single(get_test_pkh());
-    let addr = wallet.next_unused_address(KeychainKind::External);
+    let addr = wallet
+        .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist");
     let mut builder = wallet.build_tx();
     builder.add_recipient(addr.script_pubkey(), Amount::from_sat(25_000));
     let psbt = builder.finish().unwrap();
@@ -786,6 +801,7 @@ fn test_legacy_bump_fee_drain_wallet() {
             value: Amount::from_sat(25_000),
             script_pubkey: wallet
                 .next_unused_address(KeychainKind::External)
+                .expect("keychain must exist")
                 .script_pubkey(),
         }],
     };
@@ -841,6 +857,7 @@ fn test_legacy_bump_fee_add_input() {
         output: vec![TxOut {
             script_pubkey: wallet
                 .next_unused_address(KeychainKind::External)
+                .expect("keychain must exist")
                 .script_pubkey(),
             value: Amount::from_sat(25_000),
         }],
@@ -951,6 +968,7 @@ fn test_bump_fee_pay_to_anchor_foreign_utxo() {
     let (mut wallet, _) = get_funded_wallet_wpkh();
     let drain_spk = wallet
         .next_unused_address(KeychainKind::External)
+        .expect("keychain must exist")
         .script_pubkey();
 
     let witness_utxo = TxOut {
